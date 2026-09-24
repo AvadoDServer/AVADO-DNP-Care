@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AVADO Care</title>
+    <link rel="icon" href="/favicon.png" />
+    <link rel="stylesheet" href="/theme.css" />
+    <link rel="stylesheet" href="/style.css" />
+    <script src="/app.js" defer></script>
+  </head>
+  <body>
+    <main class="shell">
+      <header class="top">
+        <span class="brand">AVADO <strong>Care</strong></span>
+        <span class="version" id="version"></span>
+      </header>
+
+      <section class="card verdict" id="verdict" data-level="checking" aria-live="polite">
+        <span class="dot" aria-hidden="true"></span>
+        <div>
+          <h1 id="headline">AVADO is watching your box</h1>
+          <p id="subline">Checking your AVADO…</p>
+        </div>
+      </section>
+
+      <section class="card">
+        <dl class="facts">
+          <div>
+            <dt>Last check</dt>
+            <dd id="last-check">Not yet</dd>
+          </div>
+          <div>
+            <dt>Next check</dt>
+            <dd id="next-check">In a few minutes</dd>
+          </div>
+          <div>
+            <dt>Alerts by email</dt>
+            <dd id="subscription">Checking…</dd>
+          </div>
+        </dl>
+        <p class="notice" id="heartbeat-error" hidden></p>
+        <div class="actions">
+          <button type="button" class="button" id="check-now">Check now</button>
+          <span class="muted" id="check-now-msg" role="status"></span>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Open problems</h2>
+        <p class="muted" id="no-problems">No problems found.</p>
+        <ul class="problems" id="problems"></ul>
+      </section>
+
+      <footer class="privacy">
+        Every 10 minutes your AVADO checks itself and tells AVADO how it is doing: the names and
+        versions of your apps, how full the disk is, and the problems listed above. It never sends
+        your keys, wallet, IP address or validator details. To get alerts by email, turn on Priority
+        Care in the AVADO Admin under Priority.
+      </footer>
+    </main>
+  </body>
+</html>

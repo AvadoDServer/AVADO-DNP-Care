@@ -1,0 +1,14 @@
+version: '3.4'
+services:
+  care.avado.dnp.dappnode.eth:
+    image: 'care.avado.dnp.dappnode.eth:0.1.0'
+    build:
+      context: .
+      dockerfile: build/Dockerfile
+    volumes:
+      - 'care:/data'
+    environment:
+      - BACKEND_URL=https://priorityapi.ava.do
+    restart: always
+volumes:
+  care: {}
