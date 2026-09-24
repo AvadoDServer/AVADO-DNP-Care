@@ -8,7 +8,7 @@ services:
     volumes:
       - 'care:/data'
     environment:
-      - BACKEND_URL=https://priorityapi.ava.do
+      - 'BACKEND_URL=https://priorityapi.ava.do'
     restart: always
 volumes:
   care: {}
