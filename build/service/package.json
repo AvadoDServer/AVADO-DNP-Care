@@ -1,0 +1,26 @@
+{
+  "name": "avado-care",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AVADO Care: checks the box's health every 10 minutes and sends a signed heartbeat to AVADO",
+  "license": "GPL-3.0",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "rm -rf dist && tsc -p tsconfig.json && node scripts/vendor-build.mjs dist",
+    "lint": "tsc -p tsconfig.test.json --noEmit",
+    "test": "rm -rf .test-build && tsc -p tsconfig.test.json && node scripts/vendor-build.mjs .test-build/src && node --test .test-build/test/*.test.js",
+    "vendor:sync": "node scripts/vendor-sync.mjs",
+    "start": "node dist/server.js"
+  },
+  "devDependencies": {
+    "@types/node": "22.18.6",
+    "@types/semver": "7.7.1",
+    "typescript": "5.9.2"
+  },
+  "dependencies": {
+    "semver": "7.7.2"
+  }
+}

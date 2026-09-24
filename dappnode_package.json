@@ -1,0 +1,25 @@
+{
+  "name": "care.avado.dnp.dappnode.eth",
+  "version": "0.1.0",
+  "title": "AVADO Care",
+  "description": "Checks your AVADO's health every 10 minutes and tells AVADO how it is doing, so Priority Care can warn you by email when something goes wrong.",
+  "type": "service",
+  "autoupdate": true,
+  "image": {
+    "volumes": [
+      "care:/data"
+    ],
+    "ports": [],
+    "environment": [
+      "BACKEND_URL=https://priorityapi.ava.do"
+    ],
+    "restart": "always"
+  },
+  "author": "AVADO",
+  "license": "GPL-3.0",
+  "dependencies": {},
+  "links": {
+    "OnboardingWizard": "http://care.my.ava.do",
+    "HomePage": "https://ava.do"
+  }
+}
