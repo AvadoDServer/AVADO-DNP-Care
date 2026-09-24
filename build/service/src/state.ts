@@ -28,6 +28,8 @@ export interface CareState {
   emailVerified: boolean | null;
   /** While set (ISO time), the box clock is known to be wrong: no signing until then. */
   clockErrorUntil: string | null;
+  /** Each input's last good read (ms), so the 24 h carry-over and staleness limits survive restarts. */
+  sourceOkAt: Record<string, number>;
   /** First-seen time (ms) of each pending update, for the 48 h "update blocked" rule. */
   updateAges: Record<string, number> | null;
   /** When the backend last accepted a heartbeat. */
@@ -49,6 +51,7 @@ export function emptyState(): CareState {
     emailVerified: null,
     clockErrorUntil: null,
     updateAges: null,
+    sourceOkAt: {},
     lastSuccessAt: null,
     subscribed: null,
     outdatedDappmanager: null,
@@ -87,6 +90,11 @@ export function parseState(raw: unknown): CareState {
   s.heartbeatIssue = ISSUES.has(r.heartbeatIssue as string) ? (r.heartbeatIssue as HeartbeatIssue) : null;
   s.emailVerified = typeof r.emailVerified === "boolean" ? r.emailVerified : null;
   s.clockErrorUntil = str(r.clockErrorUntil);
+  if (r.sourceOkAt && typeof r.sourceOkAt === "object" && !Array.isArray(r.sourceOkAt)) {
+    s.sourceOkAt = Object.fromEntries(
+      Object.entries(r.sourceOkAt as Record<string, unknown>).filter((e): e is [string, number] => typeof e[1] === "number" && Number.isFinite(e[1])),
+    );
+  }
   if (r.updateAges && typeof r.updateAges === "object" && !Array.isArray(r.updateAges)) {
     s.updateAges = Object.fromEntries(
       Object.entries(r.updateAges as Record<string, unknown>).filter((e): e is [string, number] => typeof e[1] === "number" && Number.isFinite(e[1])),

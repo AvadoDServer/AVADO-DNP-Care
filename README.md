@@ -23,7 +23,7 @@ problems, and a "Check now" button.
 
 | Route | What |
 |---|---|
-| `GET /api/status` | `{version, lastHeartbeat:{at, ok, error}, heartbeatIssue, verdict, findings, subscribed, emailVerified, lastCheckAt, nextCheckAt, checking, sources}`. The AVADO Admin (exactly `http(s)://my.ava.do`) may read it cross-origin (no credentials). |
+| `GET /api/status` | `{version, lastHeartbeat:{at, ok, error}, heartbeatIssue, verdict, findings, subscribed, emailVerified, lastCheckAt, nextCheckAt, checking, sources, notice}`. The AVADO Admin (exactly `http(s)://my.ava.do`) may read it cross-origin (no credentials). |
 | `POST /api/check-now` | Runs a check and heartbeat now (at most once a minute); answers within about a minute, with `checking: true` if it is still running. Same-origin only. |
 
 Every `/api` request must be addressed to the box (Host allow-list against DNS rebinding) and every
@@ -45,8 +45,12 @@ has the file capability `cap_net_bind_service`, so port 80 works on every Docker
 - chainData: the package first listens ~6 s for a push (an open Admin tab causes one) and only then
   asks the DAPPMANAGER to publish.
 - An input whose call keeps failing (3 answered errors in a row) is left alone for 6 hours. While an
-  input fails, its previous findings are kept (for up to 24 h), so a flaky source never reads as
-  "cleared" and re-alerts.
+  input fails, its previous findings are kept for up to 24 h after its last good read, so a flaky
+  source never reads as "cleared" and re-alerts. Each input's last good read is kept in `state.json`,
+  so the 24 h limit holds across restarts.
+- A package list that could not be refreshed for more than 24 h is not used any more: the check
+  reports `checking` with no findings, `sources.packages` is `stale`, the status page says so in
+  plain words, and the box still sends a `checking` heartbeat while the DAPPMANAGER answers.
 - When the backend refuses a heartbeat's timestamp (401 with `serverTime`), the heartbeat is re-signed
   once with the backend's clock, but only if that is within 9 minutes of the box clock. Otherwise (or if
   the DAPPMANAGER refuses it) the status says the box's clock is wrong and signing waits 6 hours.

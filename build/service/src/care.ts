@@ -70,7 +70,14 @@ export interface StatusResponse {
   checking: boolean;
   /** Which inputs the last check could read ("ok", "failed", "not-installed", ...), for support. */
   sources: Record<string, string>;
+  /** A plain message about the checks themselves (not a finding), or null. */
+  notice: string | null;
 }
+
+export const NOTICES = {
+  packagesStale:
+    "Your AVADO has not been able to list its apps for more than a day, so AVADO Care can't check them. Restarting your AVADO usually fixes this; if it doesn't, please contact AVADO support.",
+} as const;
 
 export function toStatusFindings(check: CheckResult): StatusFinding[] {
   return check.findings.slice(0, 50).map((f) => ({
@@ -113,7 +120,7 @@ export class CareService {
     initialState: CareState,
   ) {
     this.state = initialState;
-    this.inputs = new Inputs(deps.now);
+    this.inputs = new Inputs(deps.now, initialState.sourceOkAt as Partial<Record<SourceName, number>>);
     this.random = deps.random ?? Math.random;
   }
 
@@ -130,6 +137,7 @@ export class CareService {
       nextCheckAt: this.nextAt === null || this.running !== null ? null : new Date(this.nextAt).toISOString(),
       checking: this.running !== null,
       sources: { ...(this.state.lastCheck?.sources ?? {}) },
+      notice: this.state.lastCheck?.sources.packages === "stale" ? NOTICES.packagesStale : null,
     };
   }
 
@@ -240,6 +248,7 @@ export class CareService {
       return await this.sendHeartbeat(wamp, check);
     } finally {
       wamp.close();
+      this.state.sourceOkAt = { ...this.inputs.lastOkTimes() };
       await this.deps.store.save(this.state);
     }
   }
@@ -249,11 +258,9 @@ export class CareService {
     const out = new Set<keyof typeof SOURCE_FINDINGS>();
     for (const source of Object.keys(SOURCE_FINDINGS) as Array<keyof typeof SOURCE_FINDINGS>) {
       if (check.sources[source] !== "failed") continue;
+      // the last good read is kept in state.json, so this limit holds across restarts
       const lastOk = this.inputs.lastOkAt(source as SourceName);
-      const lastCheckAt = this.state.lastCheck ? Date.parse(this.state.lastCheck.at) : NaN;
-      // after a restart the tracker is empty: the previous check's time stands in for it
-      const since = lastOk ?? (Number.isFinite(lastCheckAt) ? lastCheckAt : null);
-      if (since !== null && this.deps.now() - since <= CARRY_MAX_MS) out.add(source);
+      if (lastOk !== null && this.deps.now() - lastOk <= CARRY_MAX_MS) out.add(source);
     }
     return out;
   }
@@ -267,7 +274,11 @@ export class CareService {
   private async sendHeartbeat(wamp: WampSession, check: CheckResult): Promise<number | null> {
     const now = this.deps.now();
     const at = new Date(now).toISOString();
-    if (!check.ready) return this.fail(at, "dappmanager"); // nothing to report, and nobody to sign it
+    // Without a package list there is nothing to report and usually nobody to sign it. A list that
+    // is only stale (the DAPPMANAGER answers other calls) still gets a "checking" heartbeat, so the
+    // box does not read as offline.
+    const staleButUp = check.sources.packages === "stale" && check.sources.stats === "ok";
+    if (!check.ready && !staleButUp) return this.fail(at, "dappmanager");
 
     const dappmanagerVersion = check.snapshot.packages.find((p) => p.name === DAPPMANAGER_PACKAGE)?.version ?? "unknown";
     if (this.state.outdatedDappmanager && this.state.outdatedDappmanager === dappmanagerVersion) return this.fail(at, "outdated");
@@ -277,7 +288,7 @@ export class CareService {
 
     const payload = JSON.stringify(buildHeartbeatPayload(check, this.config.version));
     try {
-      const json = await this.signAndPost(wamp, payload, dappmanagerVersion, check.sources.stats === "ok");
+      const json = await this.signAndPost(wamp, payload, dappmanagerVersion, check.ready || staleButUp);
       const res = parseHeartbeatResponse(json);
       if (!res.ok) throw new BackendError("the heartbeat was not accepted", 200);
       this.state.subscribed = res.subscribed;

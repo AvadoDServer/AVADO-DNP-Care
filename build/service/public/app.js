@@ -85,6 +85,10 @@
     $("care").textContent = careText(s);
     $("subscription").textContent = emailText(s);
 
+    var notice = $("check-notice");
+    notice.textContent = s.notice || "";
+    notice.hidden = !s.notice;
+
     var err = $("heartbeat-error");
     if (s.lastHeartbeat.error && s.heartbeatIssue !== "outdated") {
       err.textContent = s.lastHeartbeat.error;

@@ -491,3 +491,66 @@ test("update blocked: critical after an update has waited 48 h; the first-seen t
     { id: "update-blocked:nimbus.avado.dnp.dappnode.eth", level: "critical", title: "nimbus can't update" },
   );
 });
+
+test("the 24 h carry-over limit survives a restart (restart at 23 h, cleared by 25 h)", async () => {
+  let statsOk = true;
+  const handlers = (): Record<string, Handler> => ({
+    ...dappmanagerHandlers(PACKAGES),
+    getStats: () => (statsOk ? envelope({ disk: "93%" }) : JSON.stringify({ success: false, message: "df failed" })),
+  });
+  const f = backend(() => jsonResponse(200, { ok: true, subscribed: true }));
+  let now = NOW;
+  const first = service({ handlers: handlers(), fetch: f.fetch, now: () => now });
+  await first.care.runOnce();
+  statsOk = false;
+  now += 60 * 60 * 1000;
+  await first.care.runOnce();
+  first.care.stop();
+  assert.ok(first.care.status().findings.some((x) => x.id === "disk-high"), "carried while getStats fails");
+
+  // the container restarts 23 h after the last good read
+  now = NOW + 23 * 60 * 60 * 1000;
+  const saved = await first.store.load();
+  assert.equal(saved.sourceOkAt.stats, NOW, "the last good read is on the volume");
+  const restarted = new CareService(first.config, silentLogger, { openWamp: () => new FakeWamp(handlers()), fetch: f.fetch, now: () => now, store: first.store, random: () => 0.5 }, saved);
+  await restarted.runOnce();
+  assert.ok(restarted.status().findings.some((x) => x.id === "disk-high"), "still carried at 23 h");
+  now = NOW + 25 * 60 * 60 * 1000;
+  await restarted.runOnce();
+  restarted.stop();
+  assert.ok(!restarted.status().findings.some((x) => x.id === "disk-high"), "dropped after 24 h without a good read");
+});
+
+test("a package list that can't be refreshed for more than 24 h is not used any more", async () => {
+  let listOk = true;
+  const base = dappmanagerHandlers([...PACKAGES, pkg("rotki.avado.dnp.dappnode.eth", { state: "exited", running: false })]);
+  const handlers: Record<string, Handler> = {
+    ...base,
+    listPackages: (kw) => (listOk ? base.listPackages!(kw) : JSON.stringify({ success: false, message: "a disk usage operation is already running" })),
+  };
+  const bodies: Array<{ verdict: string; findings: unknown[]; packages: unknown[] }> = [];
+  const f = backend((b) => (bodies.push(JSON.parse(String(b.payload))), jsonResponse(200, { ok: true, subscribed: true })));
+  let now = NOW;
+  const { care } = service({ handlers, fetch: f.fetch, now: () => now });
+  await care.runOnce();
+  assert.ok(care.status().findings.some((x) => x.id === "app-stopped:rotki.avado.dnp.dappnode.eth"));
+  listOk = false;
+  now += 23 * 60 * 60 * 1000;
+  await care.runOnce();
+  assert.equal(care.status().sources.packages, "ok", "the cached list is still used within a day");
+  assert.ok(care.status().findings.some((x) => x.id === "app-stopped:rotki.avado.dnp.dappnode.eth"));
+  assert.equal(care.status().notice, null);
+
+  now = NOW + 25 * 60 * 60 * 1000;
+  await care.runOnce();
+  care.stop();
+  const s = care.status();
+  assert.equal(s.sources.packages, "stale");
+  assert.equal(s.verdict, "checking");
+  assert.deepEqual(s.findings, [], "no findings from a stale package list");
+  assert.match(s.notice!, /has not been able to list its apps for more than a day/);
+  const last = bodies[bodies.length - 1]!;
+  assert.equal(last.verdict, "checking", "the box still checks in, as 'checking'");
+  assert.deepEqual(last.packages, []);
+  assert.deepEqual(last.findings, []);
+});

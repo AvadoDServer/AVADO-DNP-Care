@@ -33,6 +33,13 @@ export const BACKOFF_MS = 6 * 60 * 60 * 1000;
 /** Thrown instead of calling an input that is backing off. */
 export class SkippedError extends Error {}
 
+/** The package list could not be refreshed for more than PACKAGES_STALE_MS: the cached one is too old to use. */
+export class StalePackagesError extends Error {
+  override readonly name = "StalePackagesError";
+}
+
+export const PACKAGES_STALE_MS = 24 * 60 * 60 * 1000;
+
 interface Tracker {
   failures: number;
   retryAt: number;
@@ -50,7 +57,22 @@ export class Inputs {
   private fee: { at: number; key: string; value: FeeRecipients | null } | null = null;
   private readonly feeLastGood = new Map<string, { at: number; value: ClientFeeRecipients }>();
 
-  constructor(private readonly now: () => number) {}
+  /** `lastOk`: each input's last good read (ms), from the state volume, so the 24 h limits survive restarts. */
+  constructor(
+    private readonly now: () => number,
+    lastOk: Partial<Record<SourceName, number>> = {},
+  ) {
+    for (const [name, at] of Object.entries(lastOk)) {
+      if (typeof at === "number" && Number.isFinite(at)) this.tracker(name as SourceName).lastOkAt = at;
+    }
+  }
+
+  /** Each input's last good read (ms), to persist. */
+  lastOkTimes(): Partial<Record<SourceName, number>> {
+    const out: Partial<Record<SourceName, number>> = {};
+    for (const [name, t] of this.trackers) if (t.lastOkAt !== null) out[name] = t.lastOkAt;
+    return out;
+  }
 
   private tracker(name: SourceName): Tracker {
     let t = this.trackers.get(name);
@@ -90,7 +112,12 @@ export class Inputs {
       this.packages = { at: this.now(), value };
       return value;
     } catch (e) {
-      if (cached) return cached.value; // keep the last list rather than knowing nothing
+      // keep the last list rather than knowing nothing, but not for more than a day
+      const lastOk = this.lastOkAt("packages");
+      if (lastOk !== null && this.now() - lastOk > PACKAGES_STALE_MS) {
+        throw new StalePackagesError(`the package list could not be read for ${Math.round((this.now() - lastOk) / 3_600_000)} h`);
+      }
+      if (cached) return cached.value;
       throw e;
     }
   }

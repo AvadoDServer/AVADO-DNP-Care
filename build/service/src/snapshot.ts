@@ -21,7 +21,8 @@ export type Verdict = "ok" | "warning" | "critical" | "checking";
 
 export interface SnapshotSources {
   /** Where each input came from on this run; "failed" inputs are left empty (the Admin does the same). */
-  packages: "ok" | "failed";
+  /** "stale": the list could not be refreshed for more than a day, so it is not used. */
+  packages: "ok" | "failed" | "stale";
   stats: "ok" | "failed";
   params: "ok" | "failed";
   chainData: "ok" | "failed";
@@ -122,6 +123,7 @@ export async function runHealthCheck(deps: SnapshotDeps, logger: Logger): Promis
     packages = (await deps.listPackages()).map(cleanPackage).filter((p): p is PackageInfo => p !== null);
     sources.packages = "ok";
   } catch (e) {
+    if (e instanceof Error && e.name === "StalePackagesError") sources.packages = "stale";
     logger.warn(`health check: cannot list packages: ${errorMessage(e)}`);
   }
 
