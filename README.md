@@ -37,6 +37,11 @@ has the file capability `cap_net_bind_service`, so port 80 works on every Docker
   activity log.
 - `listPackages` (which runs `docker system df -v`) is called at start and then at most once an hour;
   disk use comes from `getStats` on every check. The store catalogue is checked hourly.
+- Fee recipients (for the Admin's `fee-recipient-missing` rule) are read hourly from each running
+  validator client's `:9999/keymanager` route (the key list plus one request per key, at most 64
+  keys). Only whether a key has a non-zero fee recipient is kept; no pubkey or address leaves the box.
+- Pending updates: the first time each one was seen is kept in `state.json`, for the Admin's
+  `update-blocked` rule (48 h).
 - chainData: the package first listens ~6 s for a push (an open Admin tab causes one) and only then
   asks the DAPPMANAGER to publish.
 - An input whose call keeps failing (3 answered errors in a row) is left alone for 6 hours. While an
@@ -66,7 +71,8 @@ Also for tests: `WAMP_URL`, `STORE_RPC_URL`, `IPFS_GATEWAY`, `IPFS_API`, `INTERV
 ## Health rules (vendored from the Admin)
 
 `build/service/vendor/admin` holds byte-for-byte copies of the Admin's `health/engine.js`,
-`health/clients.js`, `health/prometheus.js`, `health/rules/*.js` and `services/store/updates.js`
+`health/clients.js`, `health/prometheus.js`, `health/feeRecipients.js`, `health/updateAges.js`,
+`health/rules/*.js` and `services/store/updates.js`
 (not `fixActions.js`). `vendor/admin/VENDORED.json` records their sha256 and the Admin commit.
 `scripts/vendor-build.mjs` only rewrites their import paths for Node when building.
 

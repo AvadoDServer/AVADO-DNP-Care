@@ -13,6 +13,8 @@ export const VENDORED_FILES = [
   "health/engine.js",
   "health/clients.js",
   "health/prometheus.js",
+  "health/feeRecipients.js",
+  "health/updateAges.js",
   "health/rules/index.js",
   "health/rules/access.js",
   "health/rules/apps.js",
@@ -21,6 +23,7 @@ export const VENDORED_FILES = [
   "health/rules/setup.js",
   "health/rules/storage.js",
   "health/rules/updates.js",
+  "health/rules/validators.js",
   "services/store/updates.js",
 ];
 

@@ -19,6 +19,8 @@ function deps(overrides: Partial<SnapshotDeps> = {}): SnapshotDeps & { metricsCa
       d.metricsCalls++;
       return null;
     },
+    fetchFeeRecipients: async () => null,
+    updateAges: () => null,
     now: () => NOW,
     ...overrides,
   };

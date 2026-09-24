@@ -4,6 +4,8 @@
  *  - packages (DAPPMANAGER listPackages, which runs `docker system df -v` on the box): at start,
  *    then at most once an hour. A failed refresh keeps the last list.
  *  - store catalogue (rpc.ava.do + IPFS): at most once an hour.
+ *  - fee recipients (each validator client's keymanager, one request per key): at most once an
+ *    hour. A client that could be read before but not now keeps its last result for up to 24 h.
  *  - everything else (getStats for disk %, getParams, chainData, Prometheus): every check.
  *  - An input whose call was answered with an error (or whose HTTP request failed) 3 times in a
  *    row is left alone for 6 hours. A router that cannot be reached at all does not count: that
@@ -12,10 +14,19 @@
 import { WampError } from "./wamp.js";
 import { DappmanagerError } from "./dappmanager.js";
 
-export type SourceName = "packages" | "stats" | "params" | "chainData" | "updates" | "metrics";
+export interface ClientFeeRecipients {
+  validators: number;
+  checked: number;
+  missing: number;
+}
+export type FeeRecipients = Record<string, ClientFeeRecipients>;
+
+export type SourceName = "packages" | "stats" | "params" | "chainData" | "updates" | "metrics" | "feeRecipients";
 
 export const PACKAGES_TTL_MS = 60 * 60 * 1000;
 export const STORE_TTL_MS = 60 * 60 * 1000;
+export const FEE_RECIPIENTS_TTL_MS = 60 * 60 * 1000;
+export const FEE_RECIPIENTS_KEEP_MS = 24 * 60 * 60 * 1000;
 export const FAILURES_BEFORE_BACKOFF = 3;
 export const BACKOFF_MS = 6 * 60 * 60 * 1000;
 
@@ -36,6 +47,8 @@ export class Inputs {
   private readonly trackers = new Map<SourceName, Tracker>();
   private packages: { at: number; value: unknown[] } | null = null;
   private store: { at: number; value: unknown[] } | null = null;
+  private fee: { at: number; key: string; value: FeeRecipients | null } | null = null;
+  private readonly feeLastGood = new Map<string, { at: number; value: ClientFeeRecipients }>();
 
   constructor(private readonly now: () => number) {}
 
@@ -88,6 +101,32 @@ export class Inputs {
     if (cached && this.now() - cached.at < STORE_TTL_MS) return cached.value;
     const value = await this.read("updates", fetch);
     this.store = { at: this.now(), value };
+    return value;
+  }
+
+  /**
+   * Fee recipients of the running validator clients (`running`: their package names), at most
+   * hourly (sooner when the set of running clients changes). A running client missing from a
+   * fresh read keeps its last good result for up to 24 h, so one failed read never "clears"
+   * a finding.
+   */
+  async feeRecipients(running: readonly string[], fetch: () => Promise<FeeRecipients | null>): Promise<FeeRecipients | null> {
+    const key = [...running].sort().join("|");
+    const now = this.now();
+    if (this.fee && this.fee.key === key && now - this.fee.at < FEE_RECIPIENTS_TTL_MS) return this.fee.value;
+    let value = await this.read("feeRecipients", fetch);
+    if (value) {
+      value = { ...value };
+      for (const name of running) {
+        const fresh = value[name];
+        if (fresh) this.feeLastGood.set(name, { at: now, value: fresh });
+        else {
+          const last = this.feeLastGood.get(name);
+          if (last && now - last.at <= FEE_RECIPIENTS_KEEP_MS) value[name] = last.value;
+        }
+      }
+    }
+    this.fee = { at: now, key, value };
     return value;
   }
 

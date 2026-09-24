@@ -70,7 +70,7 @@ test("a full cycle signs the exact payload and sends it to the backend (contract
   assert.equal(s.verdict, "ok");
   assert.equal(s.version, "0.1.0");
   assert.equal(s.checking, false);
-  assert.deepEqual(s.sources, { packages: "ok", stats: "ok", params: "ok", chainData: "ok", updates: "ok", metrics: "not-installed" });
+  assert.deepEqual(s.sources, { packages: "ok", stats: "ok", params: "ok", chainData: "ok", updates: "ok", metrics: "not-installed", feeRecipients: "ok" });
 
   // persisted for the next start
   const saved = JSON.parse(readFileSync(path.join(config.stateDir, "state.json"), "utf8"));
@@ -391,4 +391,103 @@ test("without a package list nothing is signed", async () => {
   care.stop();
   assert.equal(care.status().verdict, "checking");
   assert.ok(!wamps[0]!.calls.some((c) => c.procedure.startsWith("signPrioritySupportRequest")));
+});
+
+const PUBKEY = (i: number) => "0x" + String(i).padStart(2, "0").repeat(48);
+const ADDRESS = "0x" + "ab".repeat(20);
+
+/** A backend + store + Nimbus keymanager. `fee(pubkey)` gives [status, body]. */
+function boxWithKeymanager(opts: {
+  keys: string[];
+  fee: (pk: string) => [number, unknown];
+  storeVersion?: string;
+  keymanagerDown?: () => boolean;
+  heartbeat?: (b: Record<string, unknown>) => void;
+}) {
+  return fakeFetch((url, init) => {
+    if (url === "https://backend.test/api/care/heartbeat") {
+      opts.heartbeat?.(JSON.parse(String(init!.body)));
+      return jsonResponse(200, { ok: true, subscribed: true });
+    }
+    if (url.startsWith("https://rpc.test")) return jsonResponse(200, { jsonrpc: "2.0", id: 0, result: JSON.stringify({ hash: "QmStore" }) });
+    if (url === "http://ipfs.test:8080/ipfs/QmStore") {
+      const packages = opts.storeVersion ? [{ manifest: { name: "nimbus.avado.dnp.dappnode.eth", version: opts.storeVersion }, manifesthash: "/ipfs/QmN" }] : [];
+      return jsonResponse(200, { packages });
+    }
+    if (url.startsWith("http://nimbus.my.ava.do:9999/keymanager/")) {
+      if (opts.keymanagerDown?.()) return Promise.reject(new TypeError("fetch failed"));
+      if (url.endsWith("/eth/v1/keystores")) return jsonResponse(200, { data: opts.keys.map((k) => ({ validating_pubkey: k })) });
+      const m = /validator\/(0x[0-9a-f]+)\/feerecipient$/.exec(url);
+      if (m) return jsonResponse(...opts.fee(m[1]!));
+    }
+    return new Response("not found", { status: 404 });
+  });
+}
+
+test("fee recipients: a zero address gives a critical finding without any address in the heartbeat; read hourly; kept through a failed read", async () => {
+  const bodies: string[] = [];
+  let down = false;
+  const f = boxWithKeymanager({
+    keys: [PUBKEY(1), PUBKEY(2)],
+    fee: (pk) => [200, { data: { pubkey: pk, ethaddress: pk === PUBKEY(1) ? "0x" + "0".repeat(40) : ADDRESS } }],
+    keymanagerDown: () => down,
+    heartbeat: (b) => bodies.push(String(b.payload)),
+  });
+  let now = NOW;
+  const { care } = service({ fetch: f.fetch, now: () => now });
+  await care.runOnce();
+  const p0 = JSON.parse(bodies[0]!);
+  const finding = p0.findings.find((x: { id: string }) => x.id === "fee-recipient-missing:nimbus.avado.dnp.dappnode.eth");
+  assert.deepEqual(finding, { id: "fee-recipient-missing:nimbus.avado.dnp.dappnode.eth", level: "critical", title: "Validators in nimbus have no fee recipient" });
+  for (const secret of [PUBKEY(1).slice(2, 20), "abababab", "0x000000"]) assert.ok(!bodies[0]!.includes(secret), `heartbeat contains ${secret}`);
+
+  const keymanagerCalls = () => f.calls.filter((c) => c.url.includes(":9999/keymanager/")).length;
+  const first = keymanagerCalls();
+  assert.equal(first, 3, "the key list and one fee recipient per key");
+  now += 10 * 60 * 1000;
+  await care.runOnce();
+  assert.equal(keymanagerCalls(), first, "not read again within the hour");
+
+  down = true;
+  now += 61 * 60 * 1000;
+  await care.runOnce();
+  care.stop();
+  assert.ok(JSON.parse(bodies[2]!).findings.some((x: { id: string }) => x.id.startsWith("fee-recipient-missing:")), "kept while the keymanager can't be read");
+});
+
+test("fee recipients: nothing when every key has one, when no keys are loaded, or when the answer is ambiguous", async () => {
+  for (const [keys, fee] of [
+    [[PUBKEY(1)], () => [200, { data: { ethaddress: ADDRESS } }]],
+    [[], () => [200, {}]],
+    [[PUBKEY(1)], () => [404, { message: "Could not find validator" }]],
+  ] as Array<[string[], (pk: string) => [number, unknown]]>) {
+    const bodies: string[] = [];
+    const f = boxWithKeymanager({ keys, fee, heartbeat: (b) => bodies.push(String(b.payload)) });
+    const { care } = service({ fetch: f.fetch });
+    await care.runOnce();
+    care.stop();
+    assert.ok(!bodies[0]!.includes("fee-recipient-missing"), JSON.stringify(keys));
+  }
+});
+
+test("update blocked: critical after an update has waited 48 h; the first-seen time survives a restart", async () => {
+  const bodies: string[] = [];
+  const f = boxWithKeymanager({ keys: [], fee: () => [200, {}], storeVersion: "1.2.0", heartbeat: (b) => bodies.push(String(b.payload)) });
+  let now = NOW;
+  const { care, config, store } = service({ fetch: f.fetch, now: () => now });
+  await care.runOnce();
+  care.stop();
+  assert.ok(!bodies[0]!.includes("update-blocked"));
+  assert.deepEqual(care.currentState.updateAges, { "nimbus.avado.dnp.dappnode.eth": NOW });
+
+  // restart 49 hours later
+  now += 49 * 60 * 60 * 1000;
+  const restarted = new CareService(config, silentLogger, { openWamp: () => new FakeWamp(dappmanagerHandlers(PACKAGES)), fetch: f.fetch, now: () => now, store, random: () => 0.5 }, await store.load());
+  await restarted.runOnce();
+  restarted.stop();
+  const p = JSON.parse(bodies[1]!);
+  assert.deepEqual(
+    p.findings.find((x: { id: string }) => x.id === "update-blocked:nimbus.avado.dnp.dappnode.eth"),
+    { id: "update-blocked:nimbus.avado.dnp.dappnode.eth", level: "critical", title: "nimbus can't update" },
+  );
 });

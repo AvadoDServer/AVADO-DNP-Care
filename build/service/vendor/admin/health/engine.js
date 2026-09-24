@@ -10,25 +10,26 @@ const rank = (list, value) => {
  * Run every rule over the snapshot. A rule returns a finding, an array of
  * findings, or null. One failing rule must never hide the others.
  *
- * A rule can set a static `rule.needs = "metrics"` to declare that it
- * cannot evaluate anything meaningful without `snapshot.metrics` (it would
- * otherwise just return `[]`/null and get counted as "passed" — a check
- * that never actually ran). Such a rule is skipped entirely, and doesn't
- * count towards `total`, whenever `snapshot.metrics` is null.
+ * A rule can set a static `rule.needs = "<snapshot key>"` (e.g. "metrics",
+ * "feeRecipients", "updateAges") to declare that it cannot evaluate anything
+ * meaningful without that part of the snapshot (it would otherwise just
+ * return `[]`/null and get counted as "passed" — a check that never actually
+ * ran). Such a rule is skipped entirely, and doesn't count towards `total`,
+ * whenever `snapshot[rule.needs]` is null or missing.
  *
  * @returns {{ findings: array, passed: number, total: number }}
  *   `passed` counts rules that ran and returned null or an empty array
  *   (i.e. the check ran and found nothing wrong). A rule that throws counts
  *   towards neither `passed` nor a finding — its check could not be
- *   evaluated. `total` is `rules.length` minus any metrics-dependent rules
- *   skipped because metrics are unavailable.
+ *   evaluated. `total` is `rules.length` minus any rules skipped because
+ *   the snapshot part they need is unavailable.
  */
 export function runChecksDetailed(snapshot, rules) {
   const findings = [];
   let passed = 0;
   let total = 0;
   for (const rule of rules) {
-    if (rule.needs === "metrics" && snapshot.metrics == null) continue;
+    if (rule.needs && snapshot[rule.needs] == null) continue;
     total++;
     try {
       const out = rule(snapshot);

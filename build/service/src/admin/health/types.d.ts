@@ -61,6 +61,10 @@ export interface Snapshot {
   updates: Record<string, { from: string; to: string; hash?: string }> | null;
   coreUpdate: { available: boolean };
   metrics: Metrics | null;
+  /** Per validator package that could be read; null when unknown (the rule is then skipped). */
+  feeRecipients: Record<string, { validators: number; checked: number; missing: number }> | null;
+  /** First-seen time (ms) of each pending update; null when unknown. */
+  updateAges: Record<string, number> | null;
   sources: { updates: SourceStatus; metrics: SourceStatus; [key: string]: unknown };
   now: number;
 }

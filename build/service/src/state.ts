@@ -28,6 +28,8 @@ export interface CareState {
   emailVerified: boolean | null;
   /** While set (ISO time), the box clock is known to be wrong: no signing until then. */
   clockErrorUntil: string | null;
+  /** First-seen time (ms) of each pending update, for the 48 h "update blocked" rule. */
+  updateAges: Record<string, number> | null;
   /** When the backend last accepted a heartbeat. */
   lastSuccessAt: string | null;
   /** From the last accepted heartbeat; null until the backend has answered once. */
@@ -46,6 +48,7 @@ export function emptyState(): CareState {
     heartbeatIssue: null,
     emailVerified: null,
     clockErrorUntil: null,
+    updateAges: null,
     lastSuccessAt: null,
     subscribed: null,
     outdatedDappmanager: null,
@@ -84,6 +87,11 @@ export function parseState(raw: unknown): CareState {
   s.heartbeatIssue = ISSUES.has(r.heartbeatIssue as string) ? (r.heartbeatIssue as HeartbeatIssue) : null;
   s.emailVerified = typeof r.emailVerified === "boolean" ? r.emailVerified : null;
   s.clockErrorUntil = str(r.clockErrorUntil);
+  if (r.updateAges && typeof r.updateAges === "object" && !Array.isArray(r.updateAges)) {
+    s.updateAges = Object.fromEntries(
+      Object.entries(r.updateAges as Record<string, unknown>).filter((e): e is [string, number] => typeof e[1] === "number" && Number.isFinite(e[1])),
+    );
+  }
   s.lastSuccessAt = str(r.lastSuccessAt);
   s.subscribed = typeof r.subscribed === "boolean" ? r.subscribed : null;
   s.outdatedDappmanager = str(r.outdatedDappmanager);

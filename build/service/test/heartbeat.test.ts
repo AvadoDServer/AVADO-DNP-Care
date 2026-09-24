@@ -18,6 +18,8 @@ async function check(): Promise<CheckResult> {
       fetchChainData: async () => [{ name: "Nimbus", syncing: true, message: "peer 1.2.3.4 slot 5" }],
       fetchStorePackages: async () => Promise.reject(new Error("offline")),
       fetchMetrics: async () => null,
+      fetchFeeRecipients: async () => null,
+      updateAges: () => null,
       now: () => 1790103551000,
     },
     silentLogger,

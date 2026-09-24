@@ -27,6 +27,8 @@ export interface SnapshotSources {
   chainData: "ok" | "failed";
   updates: SourceStatus;
   metrics: SourceStatus;
+  /** Validator clients' fee recipients (keymanager); "not-installed" when no validator client runs. */
+  feeRecipients: SourceStatus;
 }
 
 export interface CheckResult {
@@ -47,6 +49,10 @@ export interface SnapshotDeps {
   fetchChainData(): Promise<unknown[] | null>;
   fetchStorePackages(nodeid: string, packages: Array<{ name: string; version?: string }>): Promise<unknown[]>;
   fetchMetrics(): Promise<Metrics | null>;
+  /** Fee recipients per running validator client (vendored fetchFeeRecipients); null when none runs. */
+  fetchFeeRecipients(packages: PackageInfo[]): Promise<Snapshot["feeRecipients"]>;
+  /** Records when each pending update was first seen (vendored trackUpdateAges) and returns the ages. */
+  updateAges(updates: Snapshot["updates"]): Snapshot["updateAges"];
   now(): number;
 }
 
@@ -109,7 +115,7 @@ export function parseChainDataMessage(raw: unknown): ChainDataEntry | null {
 }
 
 export async function runHealthCheck(deps: SnapshotDeps, logger: Logger): Promise<CheckResult> {
-  const sources: SnapshotSources = { packages: "failed", stats: "failed", params: "failed", chainData: "failed", updates: "failed", metrics: "not-installed" };
+  const sources: SnapshotSources = { packages: "failed", stats: "failed", params: "failed", chainData: "failed", updates: "failed", metrics: "not-installed", feeRecipients: "not-installed" };
 
   let packages: PackageInfo[] = [];
   try {
@@ -171,6 +177,20 @@ export async function runHealthCheck(deps: SnapshotDeps, logger: Logger): Promis
     sources.metrics = metrics ? "ok" : "failed";
   }
 
+  // Fee recipients: only for running validator clients; a client that can't be read is left out.
+  let feeRecipients: Snapshot["feeRecipients"] = null;
+  if (sources.packages === "ok") {
+    try {
+      feeRecipients = await deps.fetchFeeRecipients(packages);
+      sources.feeRecipients = feeRecipients ? "ok" : "not-installed";
+    } catch (e) {
+      sources.feeRecipients = "failed";
+      logger.warn(`health check: cannot read fee recipients: ${errorMessage(e)}`);
+    }
+  }
+
+  const updateAges = deps.updateAges(updates);
+
   const now = deps.now();
   const snapshot: Snapshot = {
     packages,
@@ -181,6 +201,8 @@ export async function runHealthCheck(deps: SnapshotDeps, logger: Logger): Promis
     updates,
     coreUpdate: { available: false },
     metrics,
+    feeRecipients,
+    updateAges,
     sources: { updates: sources.updates, metrics: sources.metrics },
     now,
   };
@@ -202,12 +224,13 @@ export async function runHealthCheck(deps: SnapshotDeps, logger: Logger): Promis
  * Which findings come from which input. When an input fails for one check, its rules find
  * nothing (no data), which would read as "cleared" and re-alert when it comes back.
  */
-export const SOURCE_FINDINGS: Record<"stats" | "params" | "chainData" | "updates" | "metrics", readonly string[]> = {
+export const SOURCE_FINDINGS: Record<"stats" | "params" | "chainData" | "updates" | "metrics" | "feeRecipients", readonly string[]> = {
   stats: ["disk-high"],
   params: ["ports-closed", "no-upnp", "no-nat-loopback"],
   chainData: ["chain-syncing:", "chain-error:"],
-  updates: ["updates-available"],
+  updates: ["updates-available", "update-blocked:"],
   metrics: ["head-behind:", "low-peers:", "missed-attestations:"],
+  feeRecipients: ["fee-recipient-missing:"],
 };
 
 export function findingFromSource(id: string, source: keyof typeof SOURCE_FINDINGS): boolean {

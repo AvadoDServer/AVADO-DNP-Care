@@ -18,6 +18,8 @@ import {
 } from "./dappmanager.js";
 import { BackendError, buildHeartbeatPayload, parseHeartbeatResponse, postSigned, sha256Hex } from "./heartbeat.js";
 import { BACKOFF_MS, Inputs, type SourceName } from "./inputs.js";
+import { fetchFeeRecipients, VALIDATOR_CLIENTS } from "./admin/health/feeRecipients.js";
+import { trackUpdateAges } from "./admin/health/updateAges.js";
 import { errorMessage, type Logger } from "./log.js";
 import { carryOverFindings, fetchMetrics, runHealthCheck, SOURCE_FINDINGS, type CheckResult, type Verdict } from "./snapshot.js";
 import type { CareState, HeartbeatIssue, StateStore, StatusFinding } from "./state.js";
@@ -218,6 +220,15 @@ export class CareService {
               if (!m) throw new Error("Prometheus did not answer");
               return m;
             }),
+          fetchFeeRecipients: (packages) => {
+            const running = packages.filter((p) => p.running && VALIDATOR_CLIENTS.some((c) => c.name === p.name)).map((p) => p.name);
+            if (!running.length) return Promise.resolve(null);
+            return inputs.feeRecipients(running, () => fetchFeeRecipients(packages, this.deps.fetch));
+          },
+          updateAges: (updates) => {
+            this.state.updateAges = trackUpdateAges(this.state.updateAges, updates, this.deps.now());
+            return this.state.updateAges;
+          },
           now: this.deps.now,
         },
         this.logger,

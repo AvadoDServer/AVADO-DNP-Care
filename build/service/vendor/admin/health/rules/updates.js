@@ -61,3 +61,37 @@ export function storeUnreachable({ sources }) {
     ],
   };
 }
+
+// An update that has been available for this long and is still not installed
+// counts as blocked (see health/updateAges.js for why this is measured from
+// the outside).
+export const UPDATE_BLOCKED_AFTER_MS = 48 * 60 * 60 * 1000;
+
+export function updateBlocked({ updates, updateAges, packages, now }) {
+  return Object.entries(updates || {})
+    .filter(([name]) => updateAges && Number.isFinite(updateAges[name]) && now - updateAges[name] >= UPDATE_BLOCKED_AFTER_MS)
+    .map(([name, u]) => {
+      const pkg = (packages || []).find(p => p && p.name === name);
+      const label = pkg ? appTitle(pkg) : name.split(".")[0];
+      const manual = Boolean(pkg && (pkg.autoupdate === false || (pkg.manifest && pkg.manifest.autoupdate === false)));
+      return {
+        id: `update-blocked:${name}`,
+        severity: manual ? "warning" : "critical",
+        topic: "updates",
+        appId: name,
+        title: manual ? `${label} has not been updated for more than 2 days` : `${label} can't update`,
+        why: manual
+          ? "Automatic updates are off for this app, and a newer version has been waiting for more than 2 days. Updates carry fixes and support for network upgrades."
+          : "A newer version has been available for more than 2 days, but your AVADO has not installed it. An app that misses a network upgrade can stop working.",
+        detail: `Installed ${u.from}, available ${u.to}`,
+        fix: { kind: "link", to: "/system/updates", label: "Review updates" },
+        steps: manual
+          ? ["Open System → Updates and install the update, or turn automatic updates back on."]
+          : [
+              "Open System → Updates and install the update by hand.",
+              "If it fails, download the diagnostics report in Help and send it to AVADO support.",
+            ],
+      };
+    });
+}
+updateBlocked.needs = "updateAges";
