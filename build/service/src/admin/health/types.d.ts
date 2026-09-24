@@ -69,4 +69,4 @@ export interface Snapshot {
   now: number;
 }
 
-export type Rule = ((snapshot: Snapshot) => Finding | Finding[] | null) & { needs?: "metrics" };
+export type Rule = ((snapshot: Snapshot) => Finding | Finding[] | null) & { needs?: keyof Snapshot };

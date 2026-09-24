@@ -3,10 +3,17 @@ export interface ClientFeeRecipients {
   checked: number;
   missing: number;
 }
-export declare const VALIDATOR_CLIENTS: ReadonlyArray<{ name: string; keymanager: string }>;
+export interface ValidatorClient {
+  name: string;
+  keymanager: string;
+  beacon: string;
+  browserReadable: boolean;
+}
+export declare const VALIDATOR_CLIENTS: ReadonlyArray<ValidatorClient>;
 export declare const MAX_KEYS_CHECKED: number;
-export declare function readClientFeeRecipients(client: { name: string; keymanager: string }, fetchImpl?: typeof fetch): Promise<ClientFeeRecipients | null>;
+export declare function readClientFeeRecipients(client: ValidatorClient, fetchImpl?: typeof fetch): Promise<ClientFeeRecipients | null>;
 export declare function fetchFeeRecipients(
   packages: ReadonlyArray<{ name: string; running?: boolean }>,
   fetchImpl?: typeof fetch,
+  opts?: { browser?: boolean },
 ): Promise<Record<string, ClientFeeRecipients> | null>;

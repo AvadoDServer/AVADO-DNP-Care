@@ -141,7 +141,12 @@ export class Inputs {
     const key = [...running].sort().join("|");
     const now = this.now();
     if (this.fee && this.fee.key === key && now - this.fee.at < FEE_RECIPIENTS_TTL_MS) return this.fee.value;
-    let value = await this.read("feeRecipients", fetch);
+    // null while clients run means none could be read: a failure (back-off, carry-over), not "nothing wrong"
+    let value: FeeRecipients | null = await this.read("feeRecipients", async () => {
+      const v = await fetch();
+      if (!v) throw new Error("no validator client could be read");
+      return v;
+    });
     if (value) {
       value = { ...value };
       for (const name of running) {

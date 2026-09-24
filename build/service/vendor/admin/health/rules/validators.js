@@ -24,7 +24,7 @@ export function feeRecipientMissing({ packages, feeRecipients }) {
         steps: [
           "Open the app and set your Ethereum address as the fee recipient in its settings.",
           "If these are Rocket Pool validators, open Rocket Pool: it sets the fee recipient for its validators.",
-          "This check runs again every few minutes.",
+          "AVADO checks this again within the hour.",
         ],
       };
     });

@@ -39,7 +39,11 @@ has the file capability `cap_net_bind_service`, so port 80 works on every Docker
   disk use comes from `getStats` on every check. The store catalogue is checked hourly.
 - Fee recipients (for the Admin's `fee-recipient-missing` rule) are read hourly from each running
   validator client's `:9999/keymanager` route (the key list plus one request per key, at most 64
-  keys). Only whether a key has a non-zero fee recipient is kept; no pubkey or address leaves the box.
+  keys). A zero fee recipient counts only if the client's beacon node has that validator active or
+  exited (one batched lookup); pending or unknown keys never count. When no running client can be
+  read, the input fails (6 h back-off after 3 failures, findings carried over for up to 24 h).
+  Only counts are kept; no pubkey or address leaves the box. (The Admin cannot read these clients
+  from the browser, their CORS lists leave out http://my.ava.do, so this finding comes from Care.)
 - Pending updates: the first time each one was seen is kept in `state.json`, for the Admin's
   `update-blocked` rule (48 h).
 - chainData: the package first listens ~6 s for a push (an open Admin tab causes one) and only then

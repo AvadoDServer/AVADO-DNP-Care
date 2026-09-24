@@ -70,7 +70,7 @@ test("a full cycle signs the exact payload and sends it to the backend (contract
   assert.equal(s.verdict, "ok");
   assert.equal(s.version, "0.1.0");
   assert.equal(s.checking, false);
-  assert.deepEqual(s.sources, { packages: "ok", stats: "ok", params: "ok", chainData: "ok", updates: "ok", metrics: "not-installed", feeRecipients: "ok" });
+  assert.deepEqual(s.sources, { packages: "ok", stats: "ok", params: "ok", chainData: "ok", updates: "ok", metrics: "not-installed", feeRecipients: "failed" }); // Nimbus runs, its keymanager is not faked here
 
   // persisted for the next start
   const saved = JSON.parse(readFileSync(path.join(config.stateDir, "state.json"), "utf8"));
@@ -403,6 +403,8 @@ function boxWithKeymanager(opts: {
   storeVersion?: string;
   keymanagerDown?: () => boolean;
   heartbeat?: (b: Record<string, unknown>) => void;
+  /** The beacon node's validator statuses by pubkey (default: every key active). */
+  chain?: Record<string, string>;
 }) {
   return fakeFetch((url, init) => {
     if (url === "https://backend.test/api/care/heartbeat") {
@@ -413,6 +415,15 @@ function boxWithKeymanager(opts: {
     if (url === "http://ipfs.test:8080/ipfs/QmStore") {
       const packages = opts.storeVersion ? [{ manifest: { name: "nimbus.avado.dnp.dappnode.eth", version: opts.storeVersion }, manifesthash: "/ipfs/QmN" }] : [];
       return jsonResponse(200, { packages });
+    }
+    const beacon = /^http:\/\/nimbus\.my\.ava\.do:5052\/eth\/v1\/beacon\/states\/head\/validators\?id=(.*)$/.exec(url);
+    if (beacon) {
+      const ids = beacon[1]!.split(",");
+      const data = ids
+        .map((id) => ({ id, status: opts.chain ? opts.chain[id] : "active_ongoing" }))
+        .filter((x) => x.status)
+        .map((x) => ({ status: x.status, validator: { pubkey: x.id } }));
+      return jsonResponse(200, { data });
     }
     if (url.startsWith("http://nimbus.my.ava.do:9999/keymanager/")) {
       if (opts.keymanagerDown?.()) return Promise.reject(new TypeError("fetch failed"));
@@ -460,9 +471,11 @@ test("fee recipients: nothing when every key has one, when no keys are loaded, o
     [[PUBKEY(1)], () => [200, { data: { ethaddress: ADDRESS } }]],
     [[], () => [200, {}]],
     [[PUBKEY(1)], () => [404, { message: "Could not find validator" }]],
+    // Nimbus: zero for a key not in the chain state yet (pending, 0x01 credentials, no default)
+    [[PUBKEY(1)], () => [200, { data: { ethaddress: "0x" + "0".repeat(40) } }]],
   ] as Array<[string[], (pk: string) => [number, unknown]]>) {
     const bodies: string[] = [];
-    const f = boxWithKeymanager({ keys, fee, heartbeat: (b) => bodies.push(String(b.payload)) });
+    const f = boxWithKeymanager({ keys, fee, chain: {}, heartbeat: (b) => bodies.push(String(b.payload)) });
     const { care } = service({ fetch: f.fetch });
     await care.runOnce();
     care.stop();
