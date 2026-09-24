@@ -320,6 +320,31 @@ test("the package list is read at start and then at most hourly; disk % every ch
   assert.equal(storeCalls, 2, "the store is checked hourly too");
 });
 
+test("check-now refreshes a package list older than 60 s; automatic checks keep the hourly cadence", async () => {
+  let listCalls = 0;
+  const base = dappmanagerHandlers(PACKAGES);
+  const handlers: Record<string, Handler> = { ...base, listPackages: (kw) => (listCalls++, base.listPackages!(kw)) };
+  const f = backend(() => jsonResponse(200, { ok: true, subscribed: true }));
+  let now = NOW;
+  const { care } = service({ handlers, fetch: f.fetch, now: () => now, config: { checkNowCooldownMs: 0 } });
+
+  await care.runOnce();
+  assert.equal(listCalls, 1);
+
+  now += 65_000; // older than the 60 s check-now window, nowhere near the hourly TTL
+  await care.runOnce(); // an automatic check at the same age
+  assert.equal(listCalls, 1, "an automatic check does not force a refresh sooner than the hourly TTL");
+
+  assert.deepEqual(await care.checkNow(), { ran: true, done: true });
+  assert.equal(listCalls, 2, "check-now forces a refresh once the list is older than 60 s");
+
+  now += 10_000; // moments later: the just-refreshed list is still fresh for check-now's own window
+  assert.deepEqual(await care.checkNow(), { ran: true, done: true });
+  assert.equal(listCalls, 2, "a second check-now soon after reuses the just-refreshed list");
+
+  care.stop();
+});
+
 test("a failed input keeps its previous findings (no false 'cleared')", async () => {
   let statsOk = true;
   const base = dappmanagerHandlers(PACKAGES);

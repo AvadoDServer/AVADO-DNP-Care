@@ -65,8 +65,12 @@
     return "Not known yet";
   }
 
+  function emailAlertsOn(s) {
+    return s.subscribed === true && s.emailVerified === true;
+  }
+
   function emailText(s) {
-    if (s.subscribed === true && s.emailVerified === true) return "On";
+    if (emailAlertsOn(s)) return "On";
     if (s.subscribed === true) return "Confirm your email in the Admin under Priority";
     if (s.subscribed === false) return "Off: turn on Priority Care in the Admin";
     return "Not known yet";
@@ -84,6 +88,7 @@
     $("next-check").textContent = s.checking ? "Checking now…" : until(s.nextCheckAt);
     $("care").textContent = careText(s);
     $("subscription").textContent = emailText(s);
+    $("alerts-hint").hidden = emailAlertsOn(s);
 
     var notice = $("check-notice");
     notice.textContent = s.notice || "";

@@ -24,6 +24,8 @@ export type FeeRecipients = Record<string, ClientFeeRecipients>;
 export type SourceName = "packages" | "stats" | "params" | "chainData" | "updates" | "metrics" | "feeRecipients";
 
 export const PACKAGES_TTL_MS = 60 * 60 * 1000;
+/** The package-list TTL "check now" uses instead of PACKAGES_TTL_MS, so it shows current app state. */
+export const CHECK_NOW_PACKAGES_TTL_MS = 60 * 1000;
 export const STORE_TTL_MS = 60 * 60 * 1000;
 export const FEE_RECIPIENTS_TTL_MS = 60 * 60 * 1000;
 export const FEE_RECIPIENTS_KEEP_MS = 24 * 60 * 60 * 1000;
@@ -103,10 +105,14 @@ export class Inputs {
     }
   }
 
-  /** The installed packages: fresh when older than an hour (or `force`), else the cached list. */
-  async installedPackages(fetch: () => Promise<unknown[]>): Promise<unknown[]> {
+  /**
+   * The installed packages: fresh when older than `ttlMs` (an hour by default), else the cached
+   * list. "Check now" passes CHECK_NOW_PACKAGES_TTL_MS so a user pressing it sees current app
+   * state without forcing every automatic check to pay for a fresh `listPackages`.
+   */
+  async installedPackages(fetch: () => Promise<unknown[]>, ttlMs: number = PACKAGES_TTL_MS): Promise<unknown[]> {
     const cached = this.packages;
-    if (cached && this.now() - cached.at < PACKAGES_TTL_MS) return cached.value;
+    if (cached && this.now() - cached.at < ttlMs) return cached.value;
     try {
       const value = await this.read("packages", fetch);
       this.packages = { at: this.now(), value };

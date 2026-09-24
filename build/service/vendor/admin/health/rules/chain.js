@@ -109,16 +109,19 @@ export function lowPeers({ packages, metrics }) {
   if (!metrics) return [];
   return matchSamples(packages, metrics.peers)
     .filter(({ s }) => s.value < 10)
-    .map(({ s, match }) => ({
-      id: `low-peers:${match.pkg.name}`,
-      severity: "warning",
-      topic: "sync",
-      appId: match.pkg.name,
-      title: `${appTitle(match.pkg)} has only ${s.value} peers`,
-      why: "With few peers your client hears about new blocks late and can fall behind or miss attestations.",
-      detail: `${s.value} peers (Prometheus libp2p_peers)`,
-      fix: { kind: "link", to: "/help/access", label: "Improve connectivity" },
-    }));
+    .map(({ s, match }) => {
+      const peerWord = s.value === 1 ? "peer" : "peers";
+      return {
+        id: `low-peers:${match.pkg.name}`,
+        severity: "warning",
+        topic: "sync",
+        appId: match.pkg.name,
+        title: `${appTitle(match.pkg)} has only ${s.value} ${peerWord}`,
+        why: "With few peers your client hears about new blocks late and can fall behind or miss attestations.",
+        detail: `${s.value} ${peerWord} (Prometheus libp2p_peers)`,
+        fix: { kind: "link", to: "/help/access", label: "Improve connectivity" },
+      };
+    });
 }
 
 export function missedAttestations({ packages, metrics }) {

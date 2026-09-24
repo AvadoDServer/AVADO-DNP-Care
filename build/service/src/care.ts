@@ -17,7 +17,7 @@ import {
   signCareRequest,
 } from "./dappmanager.js";
 import { BackendError, buildHeartbeatPayload, parseHeartbeatResponse, postSigned, sha256Hex } from "./heartbeat.js";
-import { BACKOFF_MS, Inputs, type SourceName } from "./inputs.js";
+import { BACKOFF_MS, CHECK_NOW_PACKAGES_TTL_MS, Inputs, type SourceName } from "./inputs.js";
 import { fetchFeeRecipients, VALIDATOR_CLIENTS } from "./admin/health/feeRecipients.js";
 import { trackUpdateAges } from "./admin/health/updateAges.js";
 import { errorMessage, type Logger } from "./log.js";
@@ -162,10 +162,15 @@ export class CareService {
    * "Check now": joins a run in progress or starts one; refuses when the last one ended less
    * than the cooldown ago. Waits at most `waitMs`; `done: false` means it is still running
    * (the page keeps polling /api/status).
+   *
+   * A freshly started run also refreshes the package list when it is older than
+   * CHECK_NOW_PACKAGES_TTL_MS, so a user pressing "Check now" sees current app state (a stopped
+   * or newly installed app). A run already in progress keeps whatever TTL it started with;
+   * automatic checks keep the hourly cadence.
    */
   async checkNow(waitMs = 60_000): Promise<{ ran: boolean; done: boolean }> {
     if (!this.running && this.deps.now() - this.lastRunEndedAt < this.config.checkNowCooldownMs) return { ran: false, done: true };
-    const run = this.running ?? this.runOnce();
+    const run = this.running ?? this.runOnce(true);
     let timer: ReturnType<typeof setTimeout> | undefined;
     const done = await Promise.race([run.then(() => true), new Promise<boolean>((r) => (timer = setTimeout(() => r(false), waitMs)))]);
     clearTimeout(timer);
@@ -173,11 +178,11 @@ export class CareService {
   }
 
   /** One full cycle. Never throws; concurrent callers share the same run. */
-  runOnce(): Promise<void> {
+  runOnce(forcePackagesRefresh = false): Promise<void> {
     if (this.running) return this.running;
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
-    const run = this.cycle()
+    const run = this.cycle(forcePackagesRefresh)
       .catch((e: unknown) => {
         this.logger.error(`care cycle failed: ${errorMessage(e)}`);
         return null;
@@ -206,13 +211,13 @@ export class CareService {
   }
 
   /** @returns the backend's nextInSec, when it sent one */
-  private async cycle(): Promise<number | null> {
+  private async cycle(forcePackagesRefresh = false): Promise<number | null> {
     const wamp = this.deps.openWamp();
     const { inputs } = this;
     try {
       let check = await runHealthCheck(
         {
-          listPackages: () => inputs.installedPackages(() => listPackages(wamp)),
+          listPackages: () => inputs.installedPackages(() => listPackages(wamp), forcePackagesRefresh ? CHECK_NOW_PACKAGES_TTL_MS : undefined),
           getStats: () => inputs.read("stats", () => getStats(wamp)),
           getParams: () => inputs.read("params", () => getParams(wamp)),
           fetchChainData: () =>
