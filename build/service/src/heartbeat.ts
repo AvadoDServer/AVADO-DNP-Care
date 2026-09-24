@@ -24,18 +24,20 @@ export const HEARTBEAT_KEYS = ["v", "verdict", "disk", "packages", "findings", "
 const MAX_PACKAGES = 200;
 const MAX_FINDINGS = 50;
 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
+/** The backend's limits (priority-care routes/care.js): ids ≤ 120, names ≤ 200, versions ≤ 100, titles ≤ 300. */
+export const LIMITS = { id: 120, name: 120, version: 80, title: 200 } as const;
 
 export function buildHeartbeatPayload(check: CheckResult, careVersion: string): HeartbeatPayload {
   const pct = parsePercent(check.snapshot.stats.disk);
   const disk = pct === null || !Number.isFinite(pct) ? null : { usedPct: Math.max(0, Math.min(100, Math.round(pct * 10) / 10)) };
   const packages = check.snapshot.packages
-    .map((p) => ({ name: clip(String(p.name), 120), version: clip(typeof p.version === "string" ? p.version : "", 80) }))
+    .map((p) => ({ name: clip(String(p.name), LIMITS.name), version: clip(typeof p.version === "string" ? p.version : "", LIMITS.version) }))
     .sort((a, b) => a.name.localeCompare(b.name))
     .slice(0, MAX_PACKAGES);
   const findings = check.findings
     .filter((f) => f.severity === "critical" || f.severity === "warning")
     .slice(0, MAX_FINDINGS)
-    .map((f) => ({ id: clip(String(f.id), 160), level: f.severity as "critical" | "warning", title: clip(String(f.title), 200) }));
+    .map((f) => ({ id: clip(String(f.id), LIMITS.id), level: f.severity as "critical" | "warning", title: clip(String(f.title), LIMITS.title) }));
   return { v: 1, verdict: check.verdict, disk, packages, findings, care: { version: careVersion } };
 }
 
@@ -66,6 +68,8 @@ export interface HeartbeatResponse {
   ok: boolean;
   subscribed: boolean;
   nextInSec: number | null;
+  /** Optional (not in contract B yet): whether the owner's alert email is confirmed. */
+  emailVerified: boolean | null;
 }
 
 /** POSTs a signed body to the backend. Throws BackendError with the backend's plain message. */
@@ -113,5 +117,6 @@ export function parseHeartbeatResponse(json: unknown): HeartbeatResponse {
     ok: r.ok === true,
     subscribed: r.subscribed === true,
     nextInSec: typeof r.nextInSec === "number" && Number.isFinite(r.nextInSec) ? r.nextInSec : null,
+    emailVerified: typeof r.emailVerified === "boolean" ? r.emailVerified : null,
   };
 }

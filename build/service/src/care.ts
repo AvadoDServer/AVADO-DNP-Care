@@ -1,6 +1,11 @@
 /**
  * The Care loop: every 10 minutes (or when the backend asks for another interval) build the
  * health snapshot, run the Admin's rules and send the signed heartbeat.
+ *
+ * Load and noise limits (see inputs.ts): the package list and the store catalogue are read at
+ * most hourly; inputs that keep failing pause for 6 hours; while the DAPPMANAGER cannot sign
+ * care requests yet, the whole check runs hourly; while the box clock is known to be wrong,
+ * signing is tried again only every 6 hours.
  */
 import type { Config } from "./config.js";
 import {
@@ -12,40 +17,52 @@ import {
   signCareRequest,
 } from "./dappmanager.js";
 import { BackendError, buildHeartbeatPayload, parseHeartbeatResponse, postSigned, sha256Hex } from "./heartbeat.js";
+import { BACKOFF_MS, Inputs, type SourceName } from "./inputs.js";
 import { errorMessage, type Logger } from "./log.js";
-import { fetchMetrics, runHealthCheck, type CheckResult, type Verdict } from "./snapshot.js";
-import type { CareState, StateStore, StatusFinding } from "./state.js";
+import { carryOverFindings, fetchMetrics, runHealthCheck, SOURCE_FINDINGS, type CheckResult, type Verdict } from "./snapshot.js";
+import type { CareState, HeartbeatIssue, StateStore, StatusFinding } from "./state.js";
 import { fetchStorePackages } from "./store.js";
 import type { WampSession } from "./wamp.js";
 
 export const DAPPMANAGER_PACKAGE = "dappmanager.dnp.dappnode.eth";
 /** Contract B: the backend mounts the care routes under /api/care. */
 export const HEARTBEAT_ROUTE = "/api/care/heartbeat";
+/** Checks run hourly while the DAPPMANAGER cannot sign care requests yet. */
+export const OUTDATED_INTERVAL_MS = 60 * 60 * 1000;
+/** A backend time this far from the box clock cannot be signed (the DAPPMANAGER allows ±10 min). */
+export const MAX_CLOCK_SKEW_SEC = 9 * 60;
+/** Previous findings of a failing input are carried over for at most this long. */
+export const CARRY_MAX_MS = 24 * 60 * 60 * 1000;
 
-export const MESSAGES = {
-  outdated:
-    "Your AVADO needs a system update before it can check in with AVADO. System updates install automatically; this fixes itself after the next one.",
-  dappmanager: "Your AVADO's system service did not answer. AVADO Care tries again in 10 minutes.",
+export const MESSAGES: Record<HeartbeatIssue, string> = {
+  outdated: "Your AVADO needs a system update before it can check in with AVADO. This starts working after your next AVADO system update.",
+  dappmanager: "Your AVADO's system service did not answer. AVADO Care tries again shortly.",
   offline: "Your AVADO could not reach AVADO over the internet. AVADO Care tries again in 10 minutes.",
-  clock: "Your AVADO's clock is wrong, so AVADO can't receive its check-ins.",
-  signature: "AVADO could not confirm that this check-in came from your box. Check that your AVADO's date and time are right. AVADO Care tries again in 10 minutes.",
+  clock: "Your AVADO's clock is wrong, so AVADO can't receive its check-ins. Please contact AVADO support.",
+  signature: "AVADO could not confirm that this check-in came from your box. AVADO support will look into it; there is nothing you need to do.",
   slowDown: "AVADO asked this box to check in less often. AVADO Care tries again later.",
   unexpected: "Something went wrong while checking in. AVADO Care tries again in 10 minutes.",
-} as const;
+};
 
 export interface CareDeps {
   openWamp(): WampSession;
   fetch: typeof fetch;
   now(): number;
   store: StateStore;
+  /** 0..1, for the jitter on every interval. Defaults to Math.random. */
+  random?(): number;
 }
 
 export interface StatusResponse {
   version: string;
   lastHeartbeat: { at: string | null; ok: boolean; error: string | null };
+  /** Why the last heartbeat failed ("outdated", "clock", "offline", ...), null when it worked. */
+  heartbeatIssue: HeartbeatIssue | null;
   verdict: Verdict;
   findings: StatusFinding[];
   subscribed: boolean | null;
+  /** null unless the backend says whether the owner's alert email is confirmed. */
+  emailVerified: boolean | null;
   lastCheckAt: string | null;
   nextCheckAt: string | null;
   checking: boolean;
@@ -63,17 +80,19 @@ export function toStatusFindings(check: CheckResult): StatusFinding[] {
   }));
 }
 
-export function heartbeatErrorMessage(e: unknown): string {
-  if (e instanceof DappmanagerError) return e.kind === "outdated" ? MESSAGES.outdated : MESSAGES.dappmanager;
+export function heartbeatIssueOf(e: unknown): HeartbeatIssue {
+  if (e instanceof ClockError) return "clock";
+  if (e instanceof DappmanagerError) return e.kind === "outdated" ? "outdated" : "dappmanager";
   if (e instanceof BackendError) {
-    if (e.status === null) return MESSAGES.offline;
-    if (e.status === 401) return MESSAGES.signature;
-    if (e.status === 429) return MESSAGES.slowDown;
-    if (e.status >= 500) return MESSAGES.offline;
-    return MESSAGES.unexpected;
+    if (e.status === null || e.status >= 500) return "offline";
+    if (e.status === 401) return "signature";
+    if (e.status === 429) return "slowDown";
   }
-  return MESSAGES.unexpected;
+  return "unexpected";
 }
+
+/** The DAPPMANAGER cannot sign with the backend's time: the box clock is more than ~10 minutes off. */
+export class ClockError extends Error {}
 
 export class CareService {
   private state: CareState;
@@ -82,6 +101,8 @@ export class CareService {
   private nextAt: number | null = null;
   private lastRunEndedAt = 0;
   private stopped = false;
+  private readonly inputs: Inputs;
+  private readonly random: () => number;
 
   constructor(
     private readonly config: Config,
@@ -90,15 +111,19 @@ export class CareService {
     initialState: CareState,
   ) {
     this.state = initialState;
+    this.inputs = new Inputs(deps.now);
+    this.random = deps.random ?? Math.random;
   }
 
   status(): StatusResponse {
     return {
       version: this.config.version,
       lastHeartbeat: { ...this.state.lastHeartbeat },
+      heartbeatIssue: this.state.heartbeatIssue,
       verdict: this.state.lastCheck?.verdict ?? "checking",
       findings: this.state.lastCheck?.findings ?? [],
       subscribed: this.state.subscribed,
+      emailVerified: this.state.emailVerified,
       lastCheckAt: this.state.lastCheck?.at ?? null,
       nextCheckAt: this.nextAt === null || this.running !== null ? null : new Date(this.nextAt).toISOString(),
       checking: this.running !== null,
@@ -112,8 +137,8 @@ export class CareService {
 
   start(): void {
     this.stopped = false;
-    // a little jitter so boxes that rebooted together do not all check in at once
-    this.schedule(this.config.firstRunDelayMs + Math.floor(Math.random() * 30_000));
+    // jitter so boxes that rebooted together do not all check in at once
+    this.schedule(this.config.firstRunDelayMs + Math.floor(this.random() * 30_000));
   }
 
   stop(): void {
@@ -123,15 +148,18 @@ export class CareService {
     this.nextAt = null;
   }
 
-  /** "Check now": joins a run in progress; refuses when the last one ended less than the cooldown ago. */
-  async checkNow(): Promise<{ ran: boolean }> {
-    if (this.running) {
-      await this.running;
-      return { ran: true };
-    }
-    if (this.deps.now() - this.lastRunEndedAt < this.config.checkNowCooldownMs) return { ran: false };
-    await this.runOnce();
-    return { ran: true };
+  /**
+   * "Check now": joins a run in progress or starts one; refuses when the last one ended less
+   * than the cooldown ago. Waits at most `waitMs`; `done: false` means it is still running
+   * (the page keeps polling /api/status).
+   */
+  async checkNow(waitMs = 60_000): Promise<{ ran: boolean; done: boolean }> {
+    if (!this.running && this.deps.now() - this.lastRunEndedAt < this.config.checkNowCooldownMs) return { ran: false, done: true };
+    const run = this.running ?? this.runOnce();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const done = await Promise.race([run.then(() => true), new Promise<boolean>((r) => (timer = setTimeout(() => r(false), waitMs)))]);
+    clearTimeout(timer);
+    return { ran: true, done };
   }
 
   /** One full cycle. Never throws; concurrent callers share the same run. */
@@ -140,19 +168,24 @@ export class CareService {
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
     const run = this.cycle()
-      .catch((e: unknown) => this.logger.error(`care cycle failed: ${errorMessage(e)}`))
+      .catch((e: unknown) => {
+        this.logger.error(`care cycle failed: ${errorMessage(e)}`);
+        return null;
+      })
       .then((nextInSec) => {
         this.running = null;
         this.lastRunEndedAt = this.deps.now();
-        if (!this.stopped) this.schedule(this.intervalFrom(typeof nextInSec === "number" ? nextInSec : null));
+        if (!this.stopped) this.schedule(this.nextInterval(nextInSec));
       });
     this.running = run;
     return run;
   }
 
-  private intervalFrom(nextInSec: number | null): number {
-    if (nextInSec === null) return this.config.intervalMs;
-    return Math.min(this.config.maxIntervalMs, Math.max(this.config.minIntervalMs, nextInSec * 1000));
+  private nextInterval(nextInSec: number | null): number {
+    let ms = nextInSec === null ? this.config.intervalMs : Math.min(this.config.maxIntervalMs, Math.max(this.config.minIntervalMs, nextInSec * 1000));
+    if (this.state.outdatedDappmanager) ms = Math.max(ms, OUTDATED_INTERVAL_MS);
+    // ±60 s on every interval, so boxes spread out again after a backend outage
+    return Math.max(this.config.minIntervalMs / 2, ms + Math.round((this.random() * 2 - 1) * 60_000));
   }
 
   private schedule(ms: number): void {
@@ -165,19 +198,31 @@ export class CareService {
   /** @returns the backend's nextInSec, when it sent one */
   private async cycle(): Promise<number | null> {
     const wamp = this.deps.openWamp();
+    const { inputs } = this;
     try {
-      const check = await runHealthCheck(
+      let check = await runHealthCheck(
         {
-          listPackages: () => listPackages(wamp),
-          getStats: () => getStats(wamp),
-          getParams: () => getParams(wamp),
-          fetchChainData: () => fetchChainData(wamp),
-          fetchStorePackages: (nodeid, pkgs) => fetchStorePackages(this.config, nodeid, pkgs, this.deps.fetch),
-          fetchMetrics: () => fetchMetrics(this.deps.fetch),
+          listPackages: () => inputs.installedPackages(() => listPackages(wamp)),
+          getStats: () => inputs.read("stats", () => getStats(wamp)),
+          getParams: () => inputs.read("params", () => getParams(wamp)),
+          fetchChainData: () =>
+            inputs.read("chainData", async () => {
+              const data = await fetchChainData(wamp, this.config.chainDataPushWaitMs);
+              if (!data) throw new Error("no chain data arrived");
+              return data;
+            }),
+          fetchStorePackages: (nodeid, pkgs) => inputs.storePackages(() => fetchStorePackages(this.config, nodeid, pkgs, this.deps.fetch)),
+          fetchMetrics: () =>
+            inputs.read("metrics", async () => {
+              const m = await fetchMetrics(this.deps.fetch);
+              if (!m) throw new Error("Prometheus did not answer");
+              return m;
+            }),
           now: this.deps.now,
         },
         this.logger,
       );
+      check = carryOverFindings(check, this.state.lastCheck?.findings ?? [], this.carrySources(check));
       this.state.lastCheck = { at: check.at, verdict: check.verdict, findings: toStatusFindings(check), sources: { ...check.sources } };
       const criticals = check.findings.filter((f) => f.severity === "critical").length;
       this.logger.info(`health check: ${check.verdict}, ${check.findings.length} finding(s), ${criticals} critical`);
@@ -188,39 +233,64 @@ export class CareService {
     }
   }
 
-  private async sendHeartbeat(wamp: WampSession, check: CheckResult): Promise<number | null> {
-    const at = new Date(this.deps.now()).toISOString();
-    const dappmanager = check.snapshot.packages.find((p) => p.name === DAPPMANAGER_PACKAGE);
-    const dappmanagerVersion = dappmanager?.version ?? null;
-    if (this.state.outdatedDappmanager && this.state.outdatedDappmanager === dappmanagerVersion) {
-      this.state.lastHeartbeat = { at, ok: false, error: MESSAGES.outdated };
-      return null;
+  /** Failed inputs whose previous findings are kept: only while they worked within the last 24 h. */
+  private carrySources(check: CheckResult): Set<keyof typeof SOURCE_FINDINGS> {
+    const out = new Set<keyof typeof SOURCE_FINDINGS>();
+    for (const source of Object.keys(SOURCE_FINDINGS) as Array<keyof typeof SOURCE_FINDINGS>) {
+      if (check.sources[source] !== "failed") continue;
+      const lastOk = this.inputs.lastOkAt(source as SourceName);
+      const lastCheckAt = this.state.lastCheck ? Date.parse(this.state.lastCheck.at) : NaN;
+      // after a restart the tracker is empty: the previous check's time stands in for it
+      const since = lastOk ?? (Number.isFinite(lastCheckAt) ? lastCheckAt : null);
+      if (since !== null && this.deps.now() - since <= CARRY_MAX_MS) out.add(source);
     }
+    return out;
+  }
+
+  private fail(at: string, issue: HeartbeatIssue): null {
+    this.state.lastHeartbeat = { at, ok: false, error: MESSAGES[issue] };
+    this.state.heartbeatIssue = issue;
+    return null;
+  }
+
+  private async sendHeartbeat(wamp: WampSession, check: CheckResult): Promise<number | null> {
+    const now = this.deps.now();
+    const at = new Date(now).toISOString();
+    if (!check.ready) return this.fail(at, "dappmanager"); // nothing to report, and nobody to sign it
+
+    const dappmanagerVersion = check.snapshot.packages.find((p) => p.name === DAPPMANAGER_PACKAGE)?.version ?? "unknown";
+    if (this.state.outdatedDappmanager && this.state.outdatedDappmanager === dappmanagerVersion) return this.fail(at, "outdated");
+    const clockUntil = this.state.clockErrorUntil ? Date.parse(this.state.clockErrorUntil) : NaN;
+    if (Number.isFinite(clockUntil) && clockUntil > now) return this.fail(at, "clock");
+    this.state.clockErrorUntil = null;
 
     const payload = JSON.stringify(buildHeartbeatPayload(check, this.config.version));
     try {
-      const json = await this.signAndPost(wamp, payload, dappmanagerVersion);
+      const json = await this.signAndPost(wamp, payload, dappmanagerVersion, check.sources.stats === "ok");
       const res = parseHeartbeatResponse(json);
       if (!res.ok) throw new BackendError("the heartbeat was not accepted", 200);
       this.state.subscribed = res.subscribed;
+      this.state.emailVerified = res.emailVerified;
       this.state.lastHeartbeat = { at, ok: true, error: null };
+      this.state.heartbeatIssue = null;
       this.state.lastSuccessAt = at;
       this.logger.info(`heartbeat sent (${res.subscribed ? "Priority Care active" : "not subscribed"})`);
       return res.nextInSec;
     } catch (e) {
-      this.state.lastHeartbeat = { at, ok: false, error: e instanceof ClockError ? MESSAGES.clock : heartbeatErrorMessage(e) };
+      const issue = heartbeatIssueOf(e);
+      if (issue === "clock") this.state.clockErrorUntil = new Date(this.deps.now() + BACKOFF_MS).toISOString();
       this.logger.warn(`heartbeat failed: ${errorMessage(e)}`);
-      return null;
+      return this.fail(at, issue);
     }
   }
 
   /**
    * Signs the payload through the DAPPMANAGER (contract A) and posts it (contract B). When the
    * backend refuses the timestamp (401 with its serverTime), re-signs once with the backend's
-   * clock and retries once. If the DAPPMANAGER then refuses that timestamp (its own ±10 min
-   * check), the box's clock is wrong: ClockError.
+   * clock and retries once, but only when that time is within 9 minutes of this box's clock
+   * (the DAPPMANAGER refuses anything beyond ±10 min): otherwise ClockError, without asking it.
    */
-  private async signAndPost(wamp: WampSession, payload: string, dappmanagerVersion: string | null): Promise<unknown> {
+  private async signAndPost(wamp: WampSession, payload: string, dappmanagerVersion: string, readsWorked: boolean): Promise<unknown> {
     const hash = sha256Hex(payload);
     const sign = async (timestamp: number) => {
       try {
@@ -228,25 +298,27 @@ export class CareService {
         this.state.outdatedDappmanager = null;
         return sig;
       } catch (e) {
-        if (e instanceof DappmanagerError && e.kind === "outdated") this.state.outdatedDappmanager = dappmanagerVersion ?? "unknown";
-        throw e;
+        let err = e;
+        // A DAPPMANAGER without signPrioritySupportRequest at all, while its other calls answer
+        if (readsWorked && e instanceof DappmanagerError && e.kind === "unavailable" && /no_such_procedure/.test(e.message)) {
+          err = new DappmanagerError("signPrioritySupportRequest: not available on this DAPPMANAGER", "outdated");
+        }
+        if (err instanceof DappmanagerError && err.kind === "outdated") this.state.outdatedDappmanager = dappmanagerVersion;
+        throw err;
       }
-    };
-    const post = async (timestamp: number) => {
-      const sig = await sign(timestamp);
-      return postSigned(this.config.backendUrl, HEARTBEAT_ROUTE, { ...sig, payload }, this.deps.fetch);
     };
 
     try {
-      return await post(Math.floor(this.deps.now() / 1000));
+      const sig = await sign(Math.floor(this.deps.now() / 1000));
+      return await postSigned(this.config.backendUrl, HEARTBEAT_ROUTE, { ...sig, payload }, this.deps.fetch);
     } catch (e) {
       if (!(e instanceof BackendError) || e.status !== 401 || e.serverTime === null) throw e;
-      const refusedAt = this.deps.now();
+      const skew = Math.abs(e.serverTime - this.deps.now() / 1000);
+      if (skew > MAX_CLOCK_SKEW_SEC) throw new ClockError(`the box clock is ${Math.round(skew)} s away from the backend's`);
       this.logger.warn("heartbeat: the backend refused this box's time; retrying once with the backend's clock");
-      const timestamp = e.serverTime + Math.max(0, Math.round((this.deps.now() - refusedAt) / 1000));
       let sig;
       try {
-        sig = await sign(timestamp);
+        sig = await sign(e.serverTime);
       } catch (signError) {
         if (signError instanceof DappmanagerError && signError.kind === "rejected") throw new ClockError(signError.message);
         throw signError;
@@ -255,6 +327,3 @@ export class CareService {
     }
   }
 }
-
-/** The DAPPMANAGER refused to sign with the backend's time: the box's clock is off by more than 10 minutes. */
-export class ClockError extends Error {}

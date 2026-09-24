@@ -127,7 +127,7 @@ export function createApp(config: Config, logger: Logger, care: CareService): Re
           return sendError(res, 405, "Use GET for this route");
         }
         // The AVADO Admin reads this status through its own proxy, or cross-origin from
-        // http://my.ava.do as a fallback; it is read-only and shows nothing the Admin does not.
+        // http(s)://my.ava.do as a fallback; it is read-only and shows nothing the Admin does not.
         const origin = req.headers.origin;
         const cors: Record<string, string> =
           typeof origin === "string" && isStatusCorsOrigin(origin)
@@ -143,7 +143,8 @@ export function createApp(config: Config, logger: Logger, care: CareService): Re
         }
         const r = await care.checkNow();
         if (!r.ran) return sendError(res, 429, "A check just ran. Please wait a minute and try again.");
-        logger.info("check-now: done");
+        logger.info(r.done ? "check-now: done" : "check-now: still running");
+        // when the check is still running, status().checking is true and the page keeps polling
         return sendJson(res, 200, care.status());
       }
 

@@ -18,6 +18,7 @@ export function testConfig(overrides: Partial<Config> = {}): Config {
       PACKAGE_VERSION: "0.1.0",
       STATE_DIR: tempDir(),
       PUBLIC_DIR: path.resolve(process.cwd(), "public"),
+      CHAIN_DATA_PUSH_WAIT_MS: "0",
     }),
     ...overrides,
   };
@@ -64,6 +65,11 @@ export class FakeWamp implements WampSession {
     const h = this.handlers[short];
     if (!h) throw new WampError(`${procedure}: wamp.error.no_such_procedure`, "unavailable");
     return h(kwargs);
+  }
+
+  /** Publishes on the chainData topic, as the DAPPMANAGER does while an Admin tab is open. */
+  publish(data: unknown[]): void {
+    this.subs.get("chainData.dappmanager.dnp.dappnode.eth")?.([data], {});
   }
 
   async subscribe(topic: string, handler: EventHandler): Promise<void> {

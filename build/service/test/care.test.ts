@@ -34,6 +34,7 @@ function service(opts: { handlers?: Record<string, Handler>; fetch: typeof fetch
     fetch: opts.fetch,
     now: opts.now ?? (() => NOW),
     store,
+    random: () => 0.5, // no jitter
   };
   const care = new CareService(config, silentLogger, deps, emptyState());
   return { care, config, wamps, store };
@@ -55,7 +56,8 @@ test("a full cycle signs the exact payload and sends it to the backend (contract
   assert.equal(body.signature, SIGNATURE);
   assert.equal(body.timestamp, Math.floor(NOW / 1000));
   const sign = wamps[0]!.calls.find((c) => c.procedure.startsWith("signPrioritySupportRequest"))!;
-  assert.deepEqual(sign.kwargs, { action: "care-heartbeat", timestamp: body.timestamp, payloadHash: sha256Hex(body.payload) });
+  assert.deepEqual(sign.kwargs, { action: "care-heartbeat", timestamp: body.timestamp, payloadHash: sha256Hex(body.payload), dontLogError: true });
+  for (const c of wamps[0]!.calls) assert.equal(c.kwargs.dontLogError, true, `${c.procedure} without dontLogError`);
   const payload = JSON.parse(body.payload);
   assert.equal(payload.verdict, "ok");
   assert.deepEqual(payload.disk, { usedPct: 42 });
@@ -99,12 +101,17 @@ test("an outdated DAPPMANAGER: plain message, and signing is not retried until i
     },
   };
   const f = backend(() => jsonResponse(200, { ok: true, subscribed: true }));
-  const { care } = service({ handlers, fetch: f.fetch });
+  let now = NOW;
+  const { care } = service({ handlers, fetch: f.fetch, now: () => now });
   await care.runOnce();
   assert.equal(care.status().lastHeartbeat.error, MESSAGES.outdated);
+  assert.equal(care.status().heartbeatIssue, "outdated");
+  assert.equal(Date.parse(care.status().nextCheckAt!) - now, 60 * 60 * 1000, "checks run hourly while outdated");
+  now += 61 * 60 * 1000;
   await care.runOnce();
   assert.equal(signCalls, 1, "not retried on the same DAPPMANAGER version");
   dmVersion = "10.0.48";
+  now += 61 * 60 * 1000; // the package list (and so the DAPPMANAGER version) refreshes hourly
   await care.runOnce();
   care.stop();
   assert.equal(signCalls, 2, "retried after the DAPPMANAGER changed");
@@ -154,13 +161,13 @@ test("check-now joins a running check and refuses a second one within the cooldo
   const b = care.checkNow();
   assert.equal(care.status().checking, true);
   release();
-  assert.deepEqual(await a, { ran: true });
-  assert.deepEqual(await b, { ran: true });
+  assert.deepEqual(await a, { ran: true, done: true });
+  assert.deepEqual(await b, { ran: true, done: true });
   assert.equal(hbCount, 1, "both callers shared one run");
   now += 10_000;
-  assert.deepEqual(await care.checkNow(), { ran: false });
+  assert.deepEqual(await care.checkNow(), { ran: false, done: true });
   now += 60_000;
-  assert.deepEqual(await care.checkNow(), { ran: true });
+  assert.deepEqual(await care.checkNow(), { ran: true, done: true });
   care.stop();
   assert.equal(hbCount, 2);
 });
@@ -212,18 +219,51 @@ test("a 401 with serverTime: re-signed once with the backend's clock and retried
   assert.equal(care.status().lastHeartbeat.ok, true);
 });
 
-test("a 401 with a serverTime the DAPPMANAGER refuses: the box's clock is wrong", async () => {
+test("a backend time more than 9 minutes off: clock error without asking the DAPPMANAGER, retried after 6 h", async () => {
   let posts = 0;
   const f = backend(() => {
     posts++;
-    return jsonResponse(401, { error: "Timestamp out of range", serverTime: NOW / 1000 + 3 * 3600 });
+    return jsonResponse(401, { error: "Timestamp out of range", serverTime: Math.floor(now / 1000) + 3 * 3600 });
   });
-  const { handlers } = clockCheckingHandlers();
+  let now = NOW;
+  const signed: number[] = [];
+  const base = dappmanagerHandlers(PACKAGES);
+  const handlers: Record<string, Handler> = {
+    ...base,
+    signPrioritySupportRequest: (kw) => (signed.push(kw.timestamp as number), base.signPrioritySupportRequest!(kw)),
+  };
+  const { care } = service({ handlers, fetch: f.fetch, now: () => now });
+  await care.runOnce();
+  assert.equal(posts, 1);
+  assert.deepEqual(signed, [NOW / 1000], "the backend's time was never sent to the signer");
+  assert.equal(care.status().lastHeartbeat.error, MESSAGES.clock);
+  assert.equal(care.status().heartbeatIssue, "clock");
+
+  now += 10 * 60 * 1000;
+  await care.runOnce();
+  assert.equal(signed.length, 1, "no signing for 6 hours");
+  assert.equal(posts, 1);
+  assert.equal(care.status().heartbeatIssue, "clock");
+
+  now += 6 * 60 * 60 * 1000;
+  await care.runOnce();
+  care.stop();
+  assert.equal(signed.length, 2, "tried again after 6 hours");
+});
+
+test("a backend time within 9 minutes that the DAPPMANAGER still refuses is a clock error", async () => {
+  const serverTime = NOW / 1000 + 500;
+  const f = backend(() => jsonResponse(401, { error: "Timestamp out of range", serverTime }));
+  const base = dappmanagerHandlers(PACKAGES);
+  const handlers: Record<string, Handler> = {
+    ...base,
+    signPrioritySupportRequest: (kw) =>
+      kw.timestamp === serverTime ? JSON.stringify({ success: false, message: "timestamp too far from this AVADO's clock" }) : base.signPrioritySupportRequest!(kw),
+  };
   const { care } = service({ handlers, fetch: f.fetch });
   await care.runOnce();
   care.stop();
-  assert.equal(posts, 1);
-  assert.equal(care.status().lastHeartbeat.error, "Your AVADO's clock is wrong, so AVADO can't receive its check-ins.");
+  assert.equal(care.status().heartbeatIssue, "clock");
 });
 
 test("the time retry happens once, and never for a 401 without serverTime", async () => {
@@ -248,4 +288,107 @@ test("the time retry happens once, and never for a 401 without serverTime", asyn
   b.care.stop();
   assert.equal(posts, 1);
   assert.equal(b.care.status().lastHeartbeat.error, MESSAGES.signature);
+});
+
+test("the package list is read at start and then at most hourly; disk % every check", async () => {
+  let listCalls = 0;
+  let statsCalls = 0;
+  let disk = "42%";
+  const base = dappmanagerHandlers(PACKAGES);
+  const handlers: Record<string, Handler> = {
+    ...base,
+    listPackages: (kw) => (listCalls++, base.listPackages!(kw)),
+    getStats: () => (statsCalls++, envelope({ disk })),
+  };
+  const bodies: string[] = [];
+  const f = backend((b) => (bodies.push(String(b.payload)), jsonResponse(200, { ok: true, subscribed: true })));
+  let now = NOW;
+  const { care } = service({ handlers, fetch: f.fetch, now: () => now });
+  for (let i = 0; i < 6; i++) {
+    if (i === 3) disk = "91%";
+    await care.runOnce();
+    now += 10 * 60 * 1000;
+  }
+  assert.equal(listCalls, 1);
+  assert.equal(statsCalls, 6);
+  assert.deepEqual(JSON.parse(bodies[3]!).disk, { usedPct: 91 });
+  now += 1000;
+  await care.runOnce();
+  care.stop();
+  assert.equal(listCalls, 2, "refreshed after an hour");
+  const storeCalls = f.calls.filter((c) => c.url.startsWith("https://rpc.test")).length;
+  assert.equal(storeCalls, 2, "the store is checked hourly too");
+});
+
+test("a failed input keeps its previous findings (no false 'cleared')", async () => {
+  let statsOk = true;
+  const base = dappmanagerHandlers(PACKAGES);
+  const handlers: Record<string, Handler> = {
+    ...base,
+    getStats: () => (statsOk ? envelope({ disk: "93%" }) : JSON.stringify({ success: false, message: "df failed" })),
+  };
+  const bodies: Array<{ verdict: string; findings: Array<{ id: string }> }> = [];
+  const f = backend((b) => (bodies.push(JSON.parse(String(b.payload))), jsonResponse(200, { ok: true, subscribed: true })));
+  let now = NOW;
+  const { care } = service({ handlers, fetch: f.fetch, now: () => now });
+  await care.runOnce();
+  statsOk = false;
+  now += 10 * 60 * 1000;
+  await care.runOnce();
+  care.stop();
+  assert.ok(bodies[0]!.findings.some((x) => x.id === "disk-high"));
+  assert.ok(bodies[1]!.findings.some((x) => x.id === "disk-high"), "carried over while getStats fails");
+  assert.equal(bodies[1]!.verdict, "critical");
+  assert.equal(care.status().sources.stats, "failed");
+});
+
+test("an input that keeps failing pauses for 6 hours", async () => {
+  let statsCalls = 0;
+  const handlers: Record<string, Handler> = {
+    ...dappmanagerHandlers(PACKAGES),
+    getStats: () => (statsCalls++, JSON.stringify({ success: false, message: "df failed" })),
+  };
+  const f = backend(() => jsonResponse(200, { ok: true, subscribed: true }));
+  let now = NOW;
+  const { care } = service({ handlers, fetch: f.fetch, now: () => now });
+  for (let i = 0; i < 6; i++) {
+    await care.runOnce();
+    now += 10 * 60 * 1000;
+  }
+  assert.equal(statsCalls, 3, "three failures, then paused");
+  now += 6 * 60 * 60 * 1000;
+  await care.runOnce();
+  care.stop();
+  assert.equal(statsCalls, 4, "tried again after 6 hours");
+});
+
+test("every interval gets up to ±60 s of jitter", async () => {
+  const f = backend(() => jsonResponse(200, { ok: true, subscribed: true, nextInSec: 600 }));
+  const config = testConfig();
+  const store = new StateStore(config.stateDir, silentLogger);
+  const care = new CareService(config, silentLogger, { openWamp: () => new FakeWamp(dappmanagerHandlers(PACKAGES)), fetch: f.fetch, now: () => NOW, store, random: () => 1 }, emptyState());
+  await care.runOnce();
+  const next = Date.parse(care.status().nextCheckAt!);
+  care.stop();
+  assert.equal(next - NOW, 600_000 + 60_000);
+});
+
+test("a DAPPMANAGER without the signing procedure at all (other calls answer) counts as outdated", async () => {
+  const { signPrioritySupportRequest: _drop, ...handlers } = dappmanagerHandlers(PACKAGES);
+  const f = backend(() => jsonResponse(200, { ok: true, subscribed: true }));
+  const { care } = service({ handlers, fetch: f.fetch });
+  await care.runOnce();
+  care.stop();
+  assert.equal(care.status().heartbeatIssue, "outdated");
+  assert.equal(care.currentState.outdatedDappmanager, "10.0.48");
+});
+
+test("without a package list nothing is signed", async () => {
+  const handlers: Record<string, Handler> = { ...dappmanagerHandlers(PACKAGES), listPackages: () => JSON.stringify({ success: false, message: "docker down" }) };
+  const f = backend(() => jsonResponse(200, { ok: true, subscribed: true }));
+  const { care, wamps } = service({ handlers, fetch: f.fetch });
+  await care.runOnce();
+  care.stop();
+  assert.equal(care.status().verdict, "checking");
+  assert.ok(!wamps[0]!.calls.some((c) => c.procedure.startsWith("signPrioritySupportRequest")));
 });

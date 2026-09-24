@@ -27,9 +27,20 @@ const care = new CareService(
 );
 
 const server = http.createServer(createApp(config, logger, care));
-server.requestTimeout = 180_000; // check-now waits for a full cycle
+server.requestTimeout = 120_000; // check-now answers within about 60 s
 server.headersTimeout = 30_000;
 server.maxConnections = 64;
+
+server.on("error", (err: NodeJS.ErrnoException) => {
+  const reason =
+    err.code === "EACCES"
+      ? `not allowed to use port ${config.port} (the node binary needs cap_net_bind_service)`
+      : err.code === "EADDRINUSE"
+        ? `port ${config.port} is already in use`
+        : errorMessage(err);
+  logger.error(`AVADO Care cannot start its status page: ${reason}`);
+  process.exit(1);
+});
 
 server.listen(config.port, config.host, () => {
   logger.info(`AVADO Care ${config.version} listening on ${config.host}:${config.port}; heartbeats go to ${config.backendUrl}`);

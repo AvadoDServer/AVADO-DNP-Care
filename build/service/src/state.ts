@@ -8,6 +8,9 @@ import type { Severity } from "./admin/health/types.js";
 import { errorMessage, type Logger } from "./log.js";
 import type { Verdict } from "./snapshot.js";
 
+export type HeartbeatIssue = "outdated" | "clock" | "offline" | "dappmanager" | "signature" | "slowDown" | "unexpected";
+const ISSUES = new Set(["outdated", "clock", "offline", "dappmanager", "signature", "slowDown", "unexpected"]);
+
 export interface StatusFinding {
   id: string;
   severity: Severity;
@@ -19,6 +22,12 @@ export interface StatusFinding {
 export interface CareState {
   lastCheck: { at: string; verdict: Verdict; findings: StatusFinding[]; sources: Record<string, string> } | null;
   lastHeartbeat: { at: string | null; ok: boolean; error: string | null };
+  /** Why the last heartbeat failed, as a code for the status page; null when it worked. */
+  heartbeatIssue: HeartbeatIssue | null;
+  /** From the backend's heartbeat reply, when it says whether the owner's alert email is confirmed. */
+  emailVerified: boolean | null;
+  /** While set (ISO time), the box clock is known to be wrong: no signing until then. */
+  clockErrorUntil: string | null;
   /** When the backend last accepted a heartbeat. */
   lastSuccessAt: string | null;
   /** From the last accepted heartbeat; null until the backend has answered once. */
@@ -34,6 +43,9 @@ export function emptyState(): CareState {
   return {
     lastCheck: null,
     lastHeartbeat: { at: null, ok: false, error: null },
+    heartbeatIssue: null,
+    emailVerified: null,
+    clockErrorUntil: null,
     lastSuccessAt: null,
     subscribed: null,
     outdatedDappmanager: null,
@@ -69,6 +81,9 @@ export function parseState(raw: unknown): CareState {
   if (hb && typeof hb === "object") {
     s.lastHeartbeat = { at: str(hb.at), ok: hb.ok === true, error: str(hb.error) };
   }
+  s.heartbeatIssue = ISSUES.has(r.heartbeatIssue as string) ? (r.heartbeatIssue as HeartbeatIssue) : null;
+  s.emailVerified = typeof r.emailVerified === "boolean" ? r.emailVerified : null;
+  s.clockErrorUntil = str(r.clockErrorUntil);
   s.lastSuccessAt = str(r.lastSuccessAt);
   s.subscribed = typeof r.subscribed === "boolean" ? r.subscribed : null;
   s.outdatedDappmanager = str(r.outdatedDappmanager);

@@ -23,17 +23,31 @@ problems, and a "Check now" button.
 
 | Route | What |
 |---|---|
-| `GET /api/status` | `{version, lastHeartbeat:{at, ok, error}, verdict, findings, subscribed, lastCheckAt, nextCheckAt, checking, sources}`. The AVADO Admin (`http://my.ava.do`, `http://*.my.ava.do`) may read it cross-origin (no credentials). |
-| `POST /api/check-now` | Runs a check and heartbeat now (at most once a minute). Same-origin only. |
+| `GET /api/status` | `{version, lastHeartbeat:{at, ok, error}, heartbeatIssue, verdict, findings, subscribed, emailVerified, lastCheckAt, nextCheckAt, checking, sources}`. The AVADO Admin (exactly `http(s)://my.ava.do`) may read it cross-origin (no credentials). |
+| `POST /api/check-now` | Runs a check and heartbeat now (at most once a minute); answers within about a minute, with `checking: true` if it is still running. Same-origin only. |
 
 Every `/api` request must be addressed to the box (Host allow-list against DNS rebinding) and every
 POST needs `X-Avado-Request: 1` from the package's own page (CSRF guard), like the Rocket Pool package.
-Pages are served with a strict CSP. The service runs as the unprivileged `node` user.
+Pages are served with a strict CSP. The service runs as the unprivileged `node` user; the node binary
+has the file capability `cap_net_bind_service`, so port 80 works on every Docker version.
 
-When the backend refuses a heartbeat's timestamp (401 with `serverTime`), the heartbeat is re-signed
-once with the backend's clock. If the DAPPMANAGER refuses that time too, the status page says the box's
-clock is wrong. A DAPPMANAGER without the care signing actions (10.0.47 and older) is asked again only
-after it changes version, so the Admin's activity log does not fill with errors.
+## Load and noise limits
+
+- Every DAPPMANAGER call carries `dontLogError: true`, so a failed call never lands in the Admin's
+  activity log.
+- `listPackages` (which runs `docker system df -v`) is called at start and then at most once an hour;
+  disk use comes from `getStats` on every check. The store catalogue is checked hourly.
+- chainData: the package first listens ~6 s for a push (an open Admin tab causes one) and only then
+  asks the DAPPMANAGER to publish.
+- An input whose call keeps failing (3 answered errors in a row) is left alone for 6 hours. While an
+  input fails, its previous findings are kept (for up to 24 h), so a flaky source never reads as
+  "cleared" and re-alerts.
+- When the backend refuses a heartbeat's timestamp (401 with `serverTime`), the heartbeat is re-signed
+  once with the backend's clock, but only if that is within 9 minutes of the box clock. Otherwise (or if
+  the DAPPMANAGER refuses it) the status says the box's clock is wrong and signing waits 6 hours.
+- A DAPPMANAGER without the care signing actions (10.0.47 and older) is asked again only after it
+  changes version, and the checks run hourly meanwhile.
+- Every interval gets ±60 s of jitter.
 
 ## Volume
 
@@ -65,6 +79,10 @@ cd build/service
 yarn vendor:sync   # ADMIN_SRC=/path/to/DNP_ADMIN/build/src/src if needed
 yarn test
 ```
+
+Release checklist: the image build cannot see the Admin, so before each release run the sync check
+against the Admin that is being released:
+`git clone --depth 1 https://github.com/AvadoDServer/DNP_ADMIN /tmp/admin && ADMIN_SRC=/tmp/admin/build/src/src yarn test`.
 
 ## Development
 

@@ -21,7 +21,8 @@ test("signCareRequest sends exactly {action, timestamp, payloadHash} (contract A
   });
   const sig = await signCareRequest(w, "care-heartbeat", 1790000000, HASH);
   assert.deepEqual(sig, { nodeId: NODE_ID, timestamp: 1790000000, signature: SIGNATURE });
-  assert.deepEqual(w.calls[0]!.kwargs, { action: "care-heartbeat", timestamp: 1790000000, payloadHash: HASH });
+  // dontLogError keeps a failed call out of the Admin's activity log (registerHandler.js)
+  assert.deepEqual(w.calls[0]!.kwargs, { action: "care-heartbeat", timestamp: 1790000000, payloadHash: HASH, dontLogError: true });
 });
 
 test("a DAPPMANAGER without the care actions is reported as 'outdated'", async () => {
@@ -53,9 +54,24 @@ test("a signature over a different payload or time is refused", async () => {
   await assert.rejects(signCareRequest(badSig, "care-heartbeat", 5, HASH), /no signature/);
 });
 
-test("fetchChainData subscribes, requests, and returns the first published list", async () => {
+test("fetchChainData asks the DAPPMANAGER to publish only when no push arrives", async () => {
   const w = new FakeWamp({}, [{ name: "Nimbus", syncing: false }]);
-  assert.deepEqual(await fetchChainData(w), [{ name: "Nimbus", syncing: false }]);
+  assert.deepEqual(await fetchChainData(w, 10), [{ name: "Nimbus", syncing: false }]);
+  assert.deepEqual(w.calls.map((c) => c.procedure), ["requestChainData.dappmanager.dnp.dappnode.eth"]);
+  assert.deepEqual(w.calls[0]!.kwargs, { dontLogError: true });
+
+  // an open Admin tab keeps chainData flowing: then nothing is requested
+  const pushed = new FakeWamp({}, null);
+  setTimeout(() => pushed.publish([{ name: "Teku", syncing: true }]), 5);
+  assert.deepEqual(await fetchChainData(pushed, 1000), [{ name: "Teku", syncing: true }]);
+  assert.equal(pushed.calls.length, 0);
+
   const silent = new FakeWamp({}, null);
-  assert.equal(await fetchChainData(silent, 20), null);
+  assert.equal(await fetchChainData(silent, 10, 20), null);
+});
+
+test("every DAPPMANAGER call carries dontLogError", async () => {
+  const w = new FakeWamp({ listPackages: () => envelope([]) });
+  await callDappmanager(w, "listPackages", { a: 1 });
+  assert.deepEqual(w.calls[0]!.kwargs, { a: 1, dontLogError: true });
 });

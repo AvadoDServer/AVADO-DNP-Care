@@ -67,7 +67,7 @@ test("postSigned sends the signed body as JSON and returns the reply", async () 
   const f = fakeFetch(() => jsonResponse(200, { ok: true, subscribed: true, nextInSec: 600 }));
   const body = { nodeId: NODE_ID, timestamp: 1, signature: SIGNATURE, payload: "{}" };
   const r = await postSigned("https://backend.test", "/api/care/heartbeat", body, f.fetch);
-  assert.deepEqual(parseHeartbeatResponse(r), { ok: true, subscribed: true, nextInSec: 600 });
+  assert.deepEqual(parseHeartbeatResponse(r), { ok: true, subscribed: true, nextInSec: 600, emailVerified: null });
   assert.equal(f.calls[0]!.url, "https://backend.test/api/care/heartbeat");
   assert.deepEqual(JSON.parse(String(f.calls[0]!.init!.body)), body);
 });
@@ -77,4 +77,12 @@ test("postSigned turns backend errors into BackendError with the plain message",
   await assert.rejects(postSigned("https://b", "/x", { nodeId: "", timestamp: 1, signature: "", payload: "" }, f.fetch), (e: unknown) => e instanceof BackendError && e.status === 401 && e.message === "Bad signature");
   const down = fakeFetch(() => Promise.reject(new TypeError("fetch failed")));
   await assert.rejects(postSigned("https://b", "/x", { nodeId: "", timestamp: 1, signature: "", payload: "" }, down.fetch), (e: unknown) => e instanceof BackendError && e.status === null);
+});
+
+test("finding ids and titles are clipped to the backend's limits", async () => {
+  const c = await check();
+  c.findings = [{ id: "x".repeat(300), severity: "critical", topic: "sync", title: "t".repeat(500) }];
+  const [f] = buildHeartbeatPayload(c, "0.1.0").findings;
+  assert.equal(f!.id.length, 120);
+  assert.ok(f!.title.length <= 200);
 });

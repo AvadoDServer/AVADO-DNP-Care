@@ -39,24 +39,35 @@
   }
 
   function headline(s) {
-    if (s.checking && !s.lastCheckAt) return ["AVADO is watching your box", "Checking your AVADO…"];
+    var watching = s.subscribed === true ? "AVADO is watching your box" : "Your AVADO checks itself every 10 minutes";
+    if (s.checking && !s.lastCheckAt) return [watching, "Checking your AVADO…"];
+    if (s.heartbeatIssue === "outdated") {
+      return ["Waiting for a system update", "Your AVADO checks itself. It starts reporting to AVADO after its next system update."];
+    }
     if (!s.lastHeartbeat.ok && s.lastHeartbeat.at) {
       return ["AVADO can't hear from your box right now", "Your AVADO checked itself, but could not tell AVADO. See below."];
     }
     switch (s.verdict) {
       case "ok":
-        return ["AVADO is watching your box", "Everything looks good."];
+        return [watching, "Everything looks good."];
       case "warning":
-        return ["AVADO is watching your box", "Something needs your attention. See the problems below."];
+        return [watching, "Something needs your attention. See the problems below."];
       case "critical":
-        return ["AVADO is watching your box", "Action required: see the problems below."];
+        return [watching, "Action required: see the problems below."];
       default:
-        return ["AVADO is watching your box", "Checking your AVADO…"];
+        return [watching, "Checking your AVADO…"];
     }
   }
 
-  function subscriptionText(s) {
-    if (s.subscribed === true) return "On (Priority Care)";
+  function careText(s) {
+    if (s.subscribed === true) return "Active";
+    if (s.subscribed === false) return "Not active";
+    return "Not known yet";
+  }
+
+  function emailText(s) {
+    if (s.subscribed === true && s.emailVerified === true) return "On";
+    if (s.subscribed === true) return "Confirm your email in the Admin under Priority";
     if (s.subscribed === false) return "Off: turn on Priority Care in the Admin";
     return "Not known yet";
   }
@@ -67,14 +78,15 @@
     var h = headline(s);
     $("headline").textContent = h[0];
     $("subline").textContent = h[1];
-    var level = !s.lastHeartbeat.ok && s.lastHeartbeat.at ? "warning" : s.verdict;
+    var level = s.heartbeatIssue === "outdated" ? s.verdict : !s.lastHeartbeat.ok && s.lastHeartbeat.at ? "warning" : s.verdict;
     $("verdict").setAttribute("data-level", level);
     $("last-check").textContent = ago(s.lastCheckAt);
     $("next-check").textContent = s.checking ? "Checking now…" : until(s.nextCheckAt);
-    $("subscription").textContent = subscriptionText(s);
+    $("care").textContent = careText(s);
+    $("subscription").textContent = emailText(s);
 
     var err = $("heartbeat-error");
-    if (s.lastHeartbeat.error) {
+    if (s.lastHeartbeat.error && s.heartbeatIssue !== "outdated") {
       err.textContent = s.lastHeartbeat.error;
       err.hidden = false;
     } else {
@@ -135,7 +147,8 @@
       })
       .then(function (s) {
         render(s);
-        msg.textContent = "Done.";
+        msg.textContent = s.checking ? "Still checking… this page updates by itself." : "Done.";
+        if (s.checking) pollUntilDone();
       })
       .catch(function (e) {
         msg.textContent = e.message;
@@ -143,6 +156,15 @@
       .then(function () {
         btn.disabled = false;
       });
+  }
+
+  function pollUntilDone() {
+    setTimeout(function () {
+      load().then(function () {
+        if (status && status.checking) pollUntilDone();
+        else $("check-now-msg").textContent = "Done.";
+      });
+    }, 5000);
   }
 
   document.addEventListener("DOMContentLoaded", function () {

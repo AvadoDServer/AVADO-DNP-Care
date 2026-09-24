@@ -1,10 +1,10 @@
 {
   "source": "https://github.com/AvadoDServer/DNP_ADMIN build/src/src",
-  "commit": "150207c5b71361f1e3796dc2a801ee71b15e3147",
+  "commit": "b1fc2c36a1f956e5edf85929e6077bd80aaa9984",
   "note": "Byte-for-byte copies. Do not edit: run `yarn vendor:sync` instead. test/vendor-sync.test.ts checks these hashes.",
   "files": {
     "health/engine.js": "4bfcafe7d9f8d938ffd4f9ec8a517e7a3f69205abd6a7d1737d23f4b916926ee",
-    "health/clients.js": "a6310a5d974d4a4adde8a560bb65205a6efd64e73db09ed3d2a5d122d17f4dc5",
+    "health/clients.js": "351f4cca2ad5c5e22309fbebbc3d811d0ccaccca40ea20a630dd08ea1c229641",
     "health/prometheus.js": "77e396153a8f76725ac4c53a8119c406beb20c9a173716328999403614345056",
     "health/rules/index.js": "91888de30a06916b22e555b920bf057ef221d3513bba206840e122f269dd20d3",
     "health/rules/access.js": "753123ca5ded405e86737835881f433087df4ecc168971f993ab6caace409180",

@@ -1,6 +1,10 @@
 /**
  * DAPPMANAGER procedures over WAMP. Each procedure returns a JSON string holding
  * `{success, message, result}`; `result` is used only when `success === true`.
+ *
+ * Every call carries `dontLogError: true`: the DAPPMANAGER's registerHandler (all versions
+ * since 2019, 10.0.47 included) then keeps a failed call out of the Admin's activity log.
+ * The procedures destructure only the kwargs they know, so the extra kwarg is ignored.
  */
 import { WampError, type WampSession } from "./wamp.js";
 
@@ -20,7 +24,7 @@ export class DappmanagerError extends Error {
 export async function callDappmanager(wamp: WampSession, method: string, kwargs: Record<string, unknown> = {}, timeoutMs?: number): Promise<unknown> {
   let raw: unknown;
   try {
-    raw = await wamp.call(`${method}${SUFFIX}`, [], kwargs, timeoutMs);
+    raw = await wamp.call(`${method}${SUFFIX}`, [], { ...kwargs, dontLogError: true }, timeoutMs);
   } catch (e) {
     if (e instanceof WampError) throw new DappmanagerError(e.message, e.kind === "rejected" ? "rejected" : "unavailable");
     throw e;
@@ -58,23 +62,27 @@ export async function getParams(wamp: WampSession): Promise<Record<string, unkno
 }
 
 /**
- * chainData is pushed, not returned: subscribe to the DAPPMANAGER's topic, ask it to publish
- * (requestChainData publishes once right away), and take the first event. null when nothing
- * arrives in time (e.g. no chain packages are running).
+ * chainData is pushed, not returned. Subscribe to the DAPPMANAGER's topic and wait a few
+ * seconds for a push (an open Admin tab keeps it publishing every 5 s). Only when none comes,
+ * call requestChainData, which publishes once right away but also makes the DAPPMANAGER poll
+ * the chain clients every 5 s for the next 5 minutes. null when nothing arrives in time.
  */
-export async function fetchChainData(wamp: WampSession, waitMs = 15_000): Promise<unknown[] | null> {
+export async function fetchChainData(wamp: WampSession, pushWaitMs = 6_000, waitMs = 15_000): Promise<unknown[] | null> {
   let resolveFirst!: (v: unknown[] | null) => void;
   const first = new Promise<unknown[] | null>((r) => (resolveFirst = r));
   await wamp.subscribe(CHAIN_DATA_TOPIC, (args) => {
     const data = args[0];
     if (Array.isArray(data)) resolveFirst(data);
   });
-  await callDappmanager(wamp, "requestChainData");
-  const timer = setTimeout(() => resolveFirst(null), waitMs);
+  const timers: Array<ReturnType<typeof setTimeout>> = [];
+  const wait = (ms: number) => new Promise<null>((r) => timers.push(setTimeout(() => r(null), ms)));
   try {
-    return await first;
+    const pushed = await Promise.race([first, wait(pushWaitMs)]);
+    if (pushed) return pushed;
+    await callDappmanager(wamp, "requestChainData");
+    return await Promise.race([first, wait(waitMs)]);
   } finally {
-    clearTimeout(timer);
+    for (const t of timers) clearTimeout(t);
   }
 }
 

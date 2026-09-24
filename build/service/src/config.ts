@@ -22,6 +22,8 @@ export interface Config {
   firstRunDelayMs: number;
   /** Shortest time between two "Check now" runs. */
   checkNowCooldownMs: number;
+  /** How long to listen for a pushed chainData before asking the DAPPMANAGER to publish. */
+  chainDataPushWaitMs: number;
   allowedHostnames: string[];
   version: string;
 }
@@ -79,6 +81,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     maxIntervalMs: num(env, "MAX_INTERVAL_MS", 60 * 60 * 1000),
     firstRunDelayMs: num(env, "FIRST_RUN_DELAY_MS", 30 * 1000),
     checkNowCooldownMs: num(env, "CHECK_NOW_COOLDOWN_MS", 60 * 1000),
+    chainDataPushWaitMs: num(env, "CHAIN_DATA_PUSH_WAIT_MS", 6_000),
     allowedHostnames: [
       ...DEFAULT_ALLOWED_HOSTNAMES,
       ...(env.EXTRA_ALLOWED_HOSTNAMES || "")
@@ -91,9 +94,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
 }
 
 /**
- * Origins that may read GET /api/status cross-origin: the AVADO Admin at http://my.ava.do
- * (and http://*.my.ava.do). Read-only, no credentials; POSTs stay same-origin.
+ * Origins that may read GET /api/status cross-origin: exactly the AVADO Admin, http(s)://my.ava.do.
+ * (Every installed package gets a <name>.my.ava.do name, so subdomains are not trusted.)
+ * Read-only, no credentials; POSTs stay same-origin.
  */
 export function isStatusCorsOrigin(origin: string | undefined): boolean {
-  return typeof origin === "string" && /^http:\/\/(?:[a-z0-9-]+\.)*my\.ava\.do$/.test(origin);
+  return origin === "http://my.ava.do" || origin === "https://my.ava.do";
 }

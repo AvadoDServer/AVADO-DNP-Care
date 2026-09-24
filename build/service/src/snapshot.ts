@@ -24,7 +24,7 @@ export interface SnapshotSources {
   packages: "ok" | "failed";
   stats: "ok" | "failed";
   params: "ok" | "failed";
-  chainData: "ok" | "failed" | "none";
+  chainData: "ok" | "failed";
   updates: SourceStatus;
   metrics: SourceStatus;
 }
@@ -109,7 +109,7 @@ export function parseChainDataMessage(raw: unknown): ChainDataEntry | null {
 }
 
 export async function runHealthCheck(deps: SnapshotDeps, logger: Logger): Promise<CheckResult> {
-  const sources: SnapshotSources = { packages: "failed", stats: "failed", params: "failed", chainData: "none", updates: "failed", metrics: "not-installed" };
+  const sources: SnapshotSources = { packages: "failed", stats: "failed", params: "failed", chainData: "failed", updates: "failed", metrics: "not-installed" };
 
   let packages: PackageInfo[] = [];
   try {
@@ -142,9 +142,10 @@ export async function runHealthCheck(deps: SnapshotDeps, logger: Logger): Promis
     if (raw) {
       chainData = raw.map(parseChainDataMessage).filter((c): c is ChainDataEntry => c !== null);
       sources.chainData = "ok";
+    } else {
+      logger.warn("health check: no chain data arrived");
     }
   } catch (e) {
-    sources.chainData = "failed";
     logger.warn(`health check: cannot read chain data: ${errorMessage(e)}`);
   }
 
@@ -195,6 +196,53 @@ export async function runHealthCheck(deps: SnapshotDeps, logger: Logger): Promis
     snapshot,
     sources,
   };
+}
+
+/**
+ * Which findings come from which input. When an input fails for one check, its rules find
+ * nothing (no data), which would read as "cleared" and re-alert when it comes back.
+ */
+export const SOURCE_FINDINGS: Record<"stats" | "params" | "chainData" | "updates" | "metrics", readonly string[]> = {
+  stats: ["disk-high"],
+  params: ["ports-closed", "no-upnp", "no-nat-loopback"],
+  chainData: ["chain-syncing:", "chain-error:"],
+  updates: ["updates-available"],
+  metrics: ["head-behind:", "low-peers:", "missed-attestations:"],
+};
+
+export function findingFromSource(id: string, source: keyof typeof SOURCE_FINDINGS): boolean {
+  return SOURCE_FINDINGS[source].some((p) => (p.endsWith(":") ? id.startsWith(p) : id === p));
+}
+
+export interface PreviousFinding {
+  id: string;
+  severity: "critical" | "warning" | "info";
+  topic: string;
+  title: string;
+  why: string | null;
+}
+
+const SEVERITY_RANK: Record<string, number> = { critical: 0, warning: 1, info: 2 };
+
+/**
+ * For each input that failed in this check (and is listed in `carry`), keeps the previous
+ * check's findings from that input instead of dropping them, and recomputes the verdict.
+ * Carried findings are marked `carried: true`.
+ */
+export function carryOverFindings(check: CheckResult, previous: readonly PreviousFinding[], carry: ReadonlySet<keyof typeof SOURCE_FINDINGS>): CheckResult {
+  if (!check.ready || carry.size === 0 || previous.length === 0) return check;
+  const have = new Set(check.findings.map((f) => f.id));
+  const added: Finding[] = [];
+  for (const source of carry) {
+    for (const p of previous) {
+      if (!findingFromSource(p.id, source) || have.has(p.id)) continue;
+      have.add(p.id);
+      added.push({ id: p.id, severity: p.severity, topic: p.topic, title: p.title, ...(p.why ? { why: p.why } : {}), carried: true });
+    }
+  }
+  if (!added.length) return check;
+  const findings = [...check.findings, ...added].sort((a, b) => (SEVERITY_RANK[a.severity] ?? 3) - (SEVERITY_RANK[b.severity] ?? 3));
+  return { ...check, findings, verdict: verdictOf(findings).level };
 }
 
 export { fetchMetrics };

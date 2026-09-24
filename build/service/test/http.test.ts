@@ -61,13 +61,15 @@ test("GET /api/status returns contract C", async () => {
 });
 
 test("the Admin may read the status cross-origin; other origins get no CORS header", async () => {
-  for (const origin of ["http://my.ava.do", "http://admin.my.ava.do"]) {
+  for (const origin of ["http://my.ava.do", "https://my.ava.do"]) {
     const r = await request("/api/status", { headers: { origin } });
     assert.equal(r.headers["access-control-allow-origin"], origin);
     assert.equal(r.headers["access-control-allow-credentials"], undefined);
   }
-  const evil = await request("/api/status", { headers: { origin: "http://evil.example" } });
-  assert.equal(evil.headers["access-control-allow-origin"], undefined);
+  for (const origin of ["http://evil.example", "http://rotki.my.ava.do"]) {
+    const other = await request("/api/status", { headers: { origin } });
+    assert.equal(other.headers["access-control-allow-origin"], undefined, origin);
+  }
   assert.equal(isStatusCorsOrigin("http://my.ava.do.evil.com"), false);
   assert.equal(isStatusCorsOrigin("https://evilmy.ava.do"), false);
   assert.equal(isStatusCorsOrigin("http://evilmy.ava.do"), false);

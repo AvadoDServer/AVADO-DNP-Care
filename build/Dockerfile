@@ -27,8 +27,24 @@ RUN yarn build \
     && mkdir -p /out \
     && cp -a package.json dist public node_modules /out/
 
+########## Port 80 without root
+# The node binary gets the file capability cap_net_bind_service, so the `node`
+# user can bind port 80 on every Docker version (NET_BIND_SERVICE is in
+# Docker's default capability set). Docker 20.10+ would also allow it through
+# net.ipv4.ip_unprivileged_port_start=0, older Docker does not. setcap comes
+# from libcap2-bin, installed in this stage only.
+FROM --platform=linux/amd64 ${NODE_SLIM_IMAGE} AS caps
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libcap2-bin \
+    && rm -rf /var/lib/apt/lists/* \
+    && setcap cap_net_bind_service=+ep /usr/local/bin/node \
+    && getcap /usr/local/bin/node | grep -q cap_net_bind_service
+
 ########## Runtime
 FROM --platform=linux/amd64 ${NODE_SLIM_IMAGE}
+
+# COPY keeps the security.capability extended attribute set above.
+COPY --from=caps /usr/local/bin/node /usr/local/bin/node
 
 COPY --from=service /out /usr/src/service
 
@@ -44,11 +60,13 @@ RUN node -e 'const v = require("/tmp/dappnode_package.json").version; \
     && test -f /usr/src/service/public/index.html \
     && mkdir -p /data && chown node:node /data
 
-# No root needed: Docker (20.10+) lets containers bind port 80 unprivileged
-# (net.ipv4.ip_unprivileged_port_start=0), and /data is owned by `node`, so a
-# new volume starts out owned by it too.
+# No root needed: node may bind port 80 (see the caps stage), and /data is
+# owned by `node`, so a new volume starts out owned by it too.
 USER node
-ENV NODE_ENV=production \
+# A memory ceiling (the manifest format has no memory limit): the service needs
+# a few tens of MB; a leak ends in a restart instead of growing without bound.
+ENV NODE_OPTIONS=--max-old-space-size=96 \
+    NODE_ENV=production \
     STATE_DIR=/data \
     PUBLIC_DIR=/usr/src/service/public \
     PORT=80
