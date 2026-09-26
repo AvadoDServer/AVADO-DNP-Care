@@ -35,7 +35,8 @@ export function noNatLoopback({ params }) {
     severity: "info",
     topic: "access",
     title: "Use the internal address at home",
-    why: `Your router does not route its public address back into your network. When you are at home, reach your AVADO at ${params.internalIp || "its internal IP"} or my.ava.do.`,
+    // The core sends `internalip` (DAPPMANAGER getParams); `internalIp` is the old spelling.
+    why: `Your router does not route its public address back into your network. When you are at home, reach your AVADO at ${params.internalip || params.internalIp || "its internal IP"} or my.ava.do.`,
     fix: null,
     dismissable: true,
   };
