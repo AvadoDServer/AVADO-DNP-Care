@@ -25,10 +25,27 @@ export function coreUpdateAvailable({ coreUpdate }) {
     fix: { kind: "link", to: "/system/updates", label: "Review the update" },
   };
 }
+// `coreUpdate` is null while nothing has actually checked for a system update
+// (the Admin's core-update check is currently disabled), so this is skipped
+// rather than counted as a check that passed.
+coreUpdateAvailable.needs = "coreUpdate";
+
+/**
+ * Whether automatic updates are on for an installed package. The core
+ * (DAPPMANAGER listPackages) reports the switch as `manifest.autoupdate`,
+ * true unless the owner turned it off; that value wins. A top-level
+ * `autoupdate` is only a fallback for data without it. Anything else
+ * counts as on, the core's own default.
+ */
+export function isAutoUpdateOn(p) {
+  if (!p) return false;
+  if (p.manifest && typeof p.manifest.autoupdate === "boolean") return p.manifest.autoupdate;
+  return p.autoupdate !== false;
+}
 
 export function autoupdateOff({ packages }) {
   return (packages || [])
-    .filter(p => p && p.autoupdate === false)
+    .filter(p => p && !isAutoUpdateOn(p))
     .filter(p => {
       const c = getClient(p.name);
       return c && (c.role === ROLES.EXECUTION || c.role === ROLES.CONSENSUS);
@@ -73,7 +90,7 @@ export function updateBlocked({ updates, updateAges, packages, now }) {
     .map(([name, u]) => {
       const pkg = (packages || []).find(p => p && p.name === name);
       const label = pkg ? appTitle(pkg) : name.split(".")[0];
-      const manual = Boolean(pkg && (pkg.autoupdate === false || (pkg.manifest && pkg.manifest.autoupdate === false)));
+      const manual = Boolean(pkg && !isAutoUpdateOn(pkg));
       return {
         id: `update-blocked:${name}`,
         severity: manual ? "warning" : "critical",
@@ -84,6 +101,8 @@ export function updateBlocked({ updates, updateAges, packages, now }) {
           ? "Automatic updates are off for this app, and a newer version has been waiting for more than 2 days. Updates carry fixes and support for network upgrades."
           : "A newer version has been available for more than 2 days, but your AVADO has not installed it. An app that misses a network upgrade can stop working.",
         detail: `Installed ${u.from}, available ${u.to}`,
+        // Two version numbers are plain enough to show in Simple mode too.
+        detailInSimple: true,
         fix: { kind: "link", to: "/system/updates", label: "Review updates" },
         steps: manual
           ? ["Open System → Updates and install the update, or turn automatic updates back on."]

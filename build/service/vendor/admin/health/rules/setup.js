@@ -24,7 +24,8 @@ export function consensusWithoutExecution({ packages }) {
     title: `${client.label} has no execution client`,
     why: `A consensus client needs an execution client on ${NETWORKS[client.network]?.label || client.network} to follow the chain. Until you install one, it cannot attest and your validators miss rewards.`,
     fix: { kind: "link", to: "/installer?category=ethstaking", label: "Install an execution client" },
-    learnMore: "https://docs.ava.do",
+    // The docs page that walks through installing an execution client.
+    learnMore: "https://docs.ava.do/staking-ethereum/setting-up-the-eth-clients",
   }));
 }
 

@@ -1,6 +1,7 @@
-// getDiagnoseOpenPorts is already covered by health/rules/access.js's
-// portsClosed, which reads the same underlying data and gives a more
-// specific, actionable finding — no need to also surface the raw diagnose.
+// getDiagnoseOpenPorts reads the same `alertToOpenPorts` param as
+// health/rules/access.js's portsClosed, which gives a more specific,
+// actionable finding — no need to also surface the raw diagnose. (The core
+// doesn't send that param at the moment, so neither can fire.)
 const SKIP = new Set(["getDiagnoseDiskSpace", "getDiagnoseCoreDnpsRunning", "getDiagnoseOpenPorts"]);
 
 export function diagnoseFailed({ diagnoses }) {

@@ -144,10 +144,15 @@ export function missedAttestations({ packages, metrics }) {
     });
 }
 
-// These three rules can only evaluate anything with a metrics sample; when
-// metrics are unavailable they return `[]`, which would otherwise be
-// indistinguishable from "checked, found nothing wrong". `needs = "metrics"`
-// tells runChecksDetailed to skip (not count) them while metrics is null.
-headBehind.needs = "metrics";
-lowPeers.needs = "metrics";
-missedAttestations.needs = "metrics";
+// These three rules can only evaluate anything with samples from their own
+// Prometheus query; without them they return `[]`, which would otherwise be
+// indistinguishable from "checked, found nothing wrong". Their `needs`
+// predicates tell runChecksDetailed to skip (not count) them while that
+// query has no samples: metrics unavailable, that one query failed (the
+// others can still answer), or nothing reports it. The last is the normal
+// case for missed attestations: no AVADO client package turns on the
+// validator monitor those counters come from.
+const hasSamples = key => s => Boolean(s.metrics && Array.isArray(s.metrics[key]) && s.metrics[key].length > 0);
+headBehind.needs = hasSamples("headSlot");
+lowPeers.needs = hasSamples("peers");
+missedAttestations.needs = hasSamples("attesterMiss");

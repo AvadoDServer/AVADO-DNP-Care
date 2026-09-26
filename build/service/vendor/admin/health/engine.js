@@ -6,6 +6,20 @@ const rank = (list, value) => {
   return i === -1 ? list.length : i;
 };
 
+// `rule.needs`: a snapshot key that must be present, or a predicate over the
+// snapshot (see runChecksDetailed).
+function hasWhatItNeeds(rule, snapshot) {
+  if (!rule.needs) return true;
+  if (typeof rule.needs === "function") {
+    try {
+      return Boolean(rule.needs(snapshot));
+    } catch (e) {
+      return false;
+    }
+  }
+  return snapshot[rule.needs] != null;
+}
+
 /**
  * Run every rule over the snapshot. A rule returns a finding, an array of
  * findings, or null. One failing rule must never hide the others.
@@ -16,6 +30,14 @@ const rank = (list, value) => {
  * return `[]`/null and get counted as "passed" — a check that never actually
  * ran). Such a rule is skipped entirely, and doesn't count towards `total`,
  * whenever `snapshot[rule.needs]` is null or missing.
+ *
+ * For data deeper than a top-level key (e.g. one Prometheus query inside
+ * `metrics`), `rule.needs` can instead be a predicate
+ * `(snapshot) => boolean`; the rule is skipped the same way whenever it
+ * returns false. A predicate that throws also skips the rule.
+ *
+ * A rule must never return null just to mean "skipped": null and `[]` are
+ * counted as passed. Only `needs` skips a rule.
  *
  * @returns {{ findings: array, passed: number, total: number }}
  *   `passed` counts rules that ran and returned null or an empty array
@@ -29,7 +51,7 @@ export function runChecksDetailed(snapshot, rules) {
   let passed = 0;
   let total = 0;
   for (const rule of rules) {
-    if (rule.needs && snapshot[rule.needs] == null) continue;
+    if (!hasWhatItNeeds(rule, snapshot)) continue;
     total++;
     try {
       const out = rule(snapshot);

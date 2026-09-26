@@ -14,7 +14,9 @@ Every 10 minutes the package:
 
 The heartbeat carries only: package names and versions, disk use in %, the verdict, and the ids and
 titles of critical and warning findings. Never keys, wallet, IP addresses, peers or validator data.
-The backend keeps it only for Priority Care subscribers.
+The backend keeps it only for Priority Care subscribers. Tips the owner can hide on the Admin's Home
+(`dismissable` findings, e.g. two validator apps for one network) are left out of the heartbeat, the
+verdict and the status page: Care has no way to hide them.
 
 A status page at http://care.my.ava.do shows "AVADO is watching your box", the last check, open
 problems, and a "Check now" button.
@@ -52,6 +54,9 @@ has the file capability `cap_net_bind_service`, so port 80 works on every Docker
   input fails, its previous findings are kept for up to 24 h after its last good read, so a flaky
   source never reads as "cleared" and re-alerts. Each input's last good read is kept in `state.json`,
   so the 24 h limit holds across restarts.
+- Prometheus: when some queries fail and others answer, `sources.metrics` is `partial`; the rules of
+  the queries that answered run, and each failed query counts as a failed input of its own
+  (`head-behind`, `low-peers`, `missed-attestations`, 24 h from that query's last answer).
 - A package list that could not be refreshed for more than 24 h is not used any more: the check
   reports `checking` with no findings, `sources.packages` is `stale`, the status page says so in
   plain words, and the box still sends a `checking` heartbeat while the DAPPMANAGER answers.
@@ -83,6 +88,10 @@ Also for tests: `WAMP_URL`, `STORE_RPC_URL`, `IPFS_GATEWAY`, `IPFS_API`, `INTERV
 `health/rules/*.js` and `services/store/updates.js`
 (not `fixActions.js`). `vendor/admin/VENDORED.json` records their sha256 and the Admin commit.
 `scripts/vendor-build.mjs` only rewrites their import paths for Node when building.
+
+Two snapshot inputs are not read here, so their rules are skipped (not counted as passed): the system
+update check (`coreUpdate` is null, `coreUpdateAvailable`) and the Prometheus disk trend
+(`diskTrend` is null: no `diskFillingUp`, and `disk-high` has no "full in N days" forecast).
 
 `test/vendor-sync.test.ts` fails when a copy was edited here, and, when a DNP_ADMIN checkout is found
 (`$ADMIN_SRC` or `../DNP_ADMIN` next to this repo), when the Admin's files changed or it has a new

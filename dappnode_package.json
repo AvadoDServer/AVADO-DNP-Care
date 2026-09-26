@@ -1,6 +1,6 @@
 {
   "name": "care.avado.dnp.dappnode.eth",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "title": "AVADO Care",
   "description": "Checks your AVADO's health every 10 minutes and tells AVADO how it is doing, so Priority Care can warn you by email when something goes wrong.",
   "type": "service",
