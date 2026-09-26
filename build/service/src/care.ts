@@ -21,7 +21,7 @@ import { BACKOFF_MS, CHECK_NOW_PACKAGES_TTL_MS, Inputs, type SourceName } from "
 import { fetchFeeRecipients, VALIDATOR_CLIENTS } from "./admin/health/feeRecipients.js";
 import { trackUpdateAges } from "./admin/health/updateAges.js";
 import { errorMessage, type Logger } from "./log.js";
-import { carryOverFindings, fetchMetrics, runHealthCheck, SOURCE_FINDINGS, type CheckResult, type Verdict } from "./snapshot.js";
+import { carryOverFindings, failedSources, fetchMetrics, runHealthCheck, type CarrySource, type CheckResult, type Verdict } from "./snapshot.js";
 import type { CareState, HeartbeatIssue, StateStore, StatusFinding } from "./state.js";
 import { fetchStorePackages } from "./store.js";
 import type { WampSession } from "./wamp.js";
@@ -227,12 +227,7 @@ export class CareService {
               return data;
             }),
           fetchStorePackages: (nodeid, pkgs) => inputs.storePackages(() => fetchStorePackages(this.config, nodeid, pkgs, this.deps.fetch)),
-          fetchMetrics: () =>
-            inputs.read("metrics", async () => {
-              const m = await fetchMetrics(this.deps.fetch);
-              if (!m) throw new Error("Prometheus did not answer");
-              return m;
-            }),
+          fetchMetrics: () => inputs.metrics(() => fetchMetrics(this.deps.fetch)),
           fetchFeeRecipients: (packages) => {
             const running = packages.filter((p) => p.running && VALIDATOR_CLIENTS.some((c) => c.name === p.name)).map((p) => p.name);
             if (!running.length) return Promise.resolve(null);
@@ -258,13 +253,15 @@ export class CareService {
     }
   }
 
-  /** Failed inputs whose previous findings are kept: only while they worked within the last 24 h. */
-  private carrySources(check: CheckResult): Set<keyof typeof SOURCE_FINDINGS> {
-    const out = new Set<keyof typeof SOURCE_FINDINGS>();
-    for (const source of Object.keys(SOURCE_FINDINGS) as Array<keyof typeof SOURCE_FINDINGS>) {
-      if (check.sources[source] !== "failed") continue;
+  /**
+   * Failed inputs (and single failed Prometheus queries) whose previous findings are kept: only
+   * while they worked within the last 24 h.
+   */
+  private carrySources(check: CheckResult): Set<CarrySource> {
+    const out = new Set<CarrySource>();
+    for (const source of failedSources(check)) {
       // the last good read is kept in state.json, so this limit holds across restarts
-      const lastOk = this.inputs.lastOkAt(source as SourceName);
+      const lastOk = this.inputs.lastOkAt(source);
       if (lastOk !== null && this.deps.now() - lastOk <= CARRY_MAX_MS) out.add(source);
     }
     return out;

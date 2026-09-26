@@ -8,12 +8,15 @@
  *  - updates: the store catalogue compared with the installed versions (vendored computeUpdates)
  *  - metrics: Prometheus, only while the monitoring package runs (vendored fetchMetrics)
  * and then runs the vendored rules.
+ *
+ * Not read (their rules are skipped, not counted as passed): coreUpdate (nothing here checks for
+ * a system update) and diskTrend (the disk-full forecast, diskFillingUp).
  */
 import { PROMETHEUS_PACKAGE } from "./admin/health/clients.js";
 import { runChecksDetailed, verdictOf } from "./admin/health/engine.js";
 import { fetchMetrics } from "./admin/health/prometheus.js";
 import { ALL_RULES } from "./admin/health/rules/index.js";
-import type { ChainDataEntry, Finding, Metrics, PackageInfo, Snapshot, SourceStatus } from "./admin/health/types.js";
+import type { ChainDataEntry, Finding, MetricKey, Metrics, PackageInfo, Snapshot, SourceStatus } from "./admin/health/types.js";
 import { computeUpdates } from "./admin/services/store/updates.js";
 import { errorMessage, type Logger } from "./log.js";
 
@@ -27,6 +30,7 @@ export interface SnapshotSources {
   params: "ok" | "failed";
   chainData: "ok" | "failed";
   updates: SourceStatus;
+  /** "partial" when some Prometheus queries failed and the others answered (see failedMetricKeys). */
   metrics: SourceStatus;
   /** Validator clients' fee recipients (keymanager); "not-installed" when no validator client runs. */
   feeRecipients: SourceStatus;
@@ -115,6 +119,32 @@ export function parseChainDataMessage(raw: unknown): ChainDataEntry | null {
   return out as ChainDataEntry;
 }
 
+/**
+ * What Care reports (status page, heartbeat, verdict): every finding except the tips an owner can
+ * hide on the Admin's Home (`dismissable`, e.g. two-validator-clients). Care has no way to hide
+ * them, so it would warn (and email) about them for good.
+ */
+export function reportable(findings: readonly Finding[]): Finding[] {
+  return findings.filter((f) => !f.dismissable);
+}
+
+/**
+ * Which findings come from which Prometheus query (the `needs` predicates in rules/chain.js).
+ * missed-attestations also reads the hit count: without it the share of misses (its severity) is wrong.
+ */
+export const METRIC_FINDINGS: Record<MetricKey, readonly string[]> = {
+  headSlot: ["head-behind:"],
+  peers: ["low-peers:"],
+  attesterMiss: ["missed-attestations:"],
+  attesterHit: ["missed-attestations:"],
+};
+
+/** The queries that failed in a partial Prometheus read (their key is null); none when there is no read. */
+export function failedMetricKeys(metrics: Metrics | null): MetricKey[] {
+  if (!metrics) return [];
+  return (Object.keys(METRIC_FINDINGS) as MetricKey[]).filter((key) => metrics[key] == null);
+}
+
 export async function runHealthCheck(deps: SnapshotDeps, logger: Logger): Promise<CheckResult> {
   const sources: SnapshotSources = { packages: "failed", stats: "failed", params: "failed", chainData: "failed", updates: "failed", metrics: "not-installed", feeRecipients: "not-installed" };
 
@@ -176,7 +206,7 @@ export async function runHealthCheck(deps: SnapshotDeps, logger: Logger): Promis
   let metrics: Metrics | null = null;
   if (packages.some((p) => p.name === PROMETHEUS_PACKAGE && p.running)) {
     metrics = await deps.fetchMetrics().catch(() => null);
-    sources.metrics = metrics ? "ok" : "failed";
+    sources.metrics = !metrics ? "failed" : failedMetricKeys(metrics).length ? "partial" : "ok";
   }
 
   // Fee recipients: only for running validator clients; a client that can't be read is left out.
@@ -201,8 +231,12 @@ export async function runHealthCheck(deps: SnapshotDeps, logger: Logger): Promis
     diagnoses: [],
     chainData,
     updates,
-    coreUpdate: { available: false },
+    // Nothing here checks for a system update: null skips coreUpdateAvailable (like the Admin
+    // while its own core-update check is off) instead of counting it as a check that passed.
+    coreUpdate: null,
     metrics,
+    // Not read: the disk-full forecast (diskFillingUp) is skipped and disk-high has no forecast.
+    diskTrend: null,
     feeRecipients,
     updateAges,
     sources: { updates: sources.updates, metrics: sources.metrics },
@@ -211,7 +245,7 @@ export async function runHealthCheck(deps: SnapshotDeps, logger: Logger): Promis
 
   // No verdict without the package list: every rule would find nothing and read as "all good".
   const ready = sources.packages === "ok" && packages.length > 0;
-  const findings = ready ? runChecksDetailed(snapshot, ALL_RULES).findings : [];
+  const findings = ready ? reportable(runChecksDetailed(snapshot, ALL_RULES).findings) : [];
   return {
     at: new Date(now).toISOString(),
     ready,
@@ -225,6 +259,7 @@ export async function runHealthCheck(deps: SnapshotDeps, logger: Logger): Promis
 /**
  * Which findings come from which input. When an input fails for one check, its rules find
  * nothing (no data), which would read as "cleared" and re-alert when it comes back.
+ * One Prometheus query that fails while the others answer is its own input (METRIC_FINDINGS).
  */
 export const SOURCE_FINDINGS: Record<"stats" | "params" | "chainData" | "updates" | "metrics" | "feeRecipients", readonly string[]> = {
   stats: ["disk-high"],
@@ -235,8 +270,20 @@ export const SOURCE_FINDINGS: Record<"stats" | "params" | "chainData" | "updates
   feeRecipients: ["fee-recipient-missing:"],
 };
 
-export function findingFromSource(id: string, source: keyof typeof SOURCE_FINDINGS): boolean {
-  return SOURCE_FINDINGS[source].some((p) => (p.endsWith(":") ? id.startsWith(p) : id === p));
+/** An input that failed in a check: a whole one, or one Prometheus query while the others answered ("metrics.headSlot"). */
+export type CarrySource = keyof typeof SOURCE_FINDINGS | `metrics.${MetricKey}`;
+
+const prefixesOf = (source: CarrySource): readonly string[] =>
+  source.startsWith("metrics.") ? METRIC_FINDINGS[source.slice("metrics.".length) as MetricKey] : SOURCE_FINDINGS[source as keyof typeof SOURCE_FINDINGS];
+
+export function findingFromSource(id: string, source: CarrySource): boolean {
+  return prefixesOf(source).some((p) => (p.endsWith(":") ? id.startsWith(p) : id === p));
+}
+
+/** The inputs that failed in this check, and each Prometheus query that failed while the others answered. */
+export function failedSources(check: CheckResult): CarrySource[] {
+  const inputs = (Object.keys(SOURCE_FINDINGS) as Array<keyof typeof SOURCE_FINDINGS>).filter((s) => check.sources[s] === "failed");
+  return [...inputs, ...failedMetricKeys(check.snapshot.metrics).map((key): CarrySource => `metrics.${key}`)];
 }
 
 export interface PreviousFinding {
@@ -251,22 +298,24 @@ const SEVERITY_RANK: Record<string, number> = { critical: 0, warning: 1, info: 2
 
 /**
  * For each input that failed in this check (and is listed in `carry`), keeps the previous
- * check's findings from that input instead of dropping them, and recomputes the verdict.
- * Carried findings are marked `carried: true`.
+ * check's findings from that input instead of this check's, and recomputes the verdict.
+ * This check's own findings from it are dropped: a whole input that failed gives none, but a
+ * rule can still run on a partial Prometheus read (missed-attestations without the hit count)
+ * and would raise or escalate a finding on half the data. Carried findings are marked `carried: true`.
  */
-export function carryOverFindings(check: CheckResult, previous: readonly PreviousFinding[], carry: ReadonlySet<keyof typeof SOURCE_FINDINGS>): CheckResult {
-  if (!check.ready || carry.size === 0 || previous.length === 0) return check;
-  const have = new Set(check.findings.map((f) => f.id));
+export function carryOverFindings(check: CheckResult, previous: readonly PreviousFinding[], carry: ReadonlySet<CarrySource>): CheckResult {
+  if (!check.ready || carry.size === 0) return check;
+  const fromFailed = (id: string) => [...carry].some((source) => findingFromSource(id, source));
+  const kept = check.findings.filter((f) => !fromFailed(String(f.id)));
+  const have = new Set(kept.map((f) => f.id));
   const added: Finding[] = [];
-  for (const source of carry) {
-    for (const p of previous) {
-      if (!findingFromSource(p.id, source) || have.has(p.id)) continue;
-      have.add(p.id);
-      added.push({ id: p.id, severity: p.severity, topic: p.topic, title: p.title, ...(p.why ? { why: p.why } : {}), carried: true });
-    }
+  for (const p of previous) {
+    if (!fromFailed(p.id) || have.has(p.id)) continue;
+    have.add(p.id);
+    added.push({ id: p.id, severity: p.severity, topic: p.topic, title: p.title, ...(p.why ? { why: p.why } : {}), carried: true });
   }
-  if (!added.length) return check;
-  const findings = [...check.findings, ...added].sort((a, b) => (SEVERITY_RANK[a.severity] ?? 3) - (SEVERITY_RANK[b.severity] ?? 3));
+  if (!added.length && kept.length === check.findings.length) return check;
+  const findings = [...kept, ...added].sort((a, b) => (SEVERITY_RANK[a.severity] ?? 3) - (SEVERITY_RANK[b.severity] ?? 3));
   return { ...check, findings, verdict: verdictOf(findings).level };
 }
 

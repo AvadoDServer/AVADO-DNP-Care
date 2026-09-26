@@ -4,24 +4,37 @@ import path from "node:path";
 import { test } from "node:test";
 import { CareService, MESSAGES, type CareDeps } from "../src/care.js";
 import type { Config } from "../src/config.js";
+import { QUERIES } from "../src/admin/health/prometheus.js";
+import type { MetricKey, MetricSample } from "../src/admin/health/types.js";
 import { sha256Hex } from "../src/heartbeat.js";
 import { silentLogger } from "../src/log.js";
-import { StateStore, emptyState } from "../src/state.js";
+import { StateStore, emptyState, type CareState } from "../src/state.js";
 import { FakeWamp, NODE_ID, SIGNATURE, dappmanagerHandlers, envelope, fakeFetch, jsonResponse, pkg, testConfig, type Handler } from "./helpers.js";
 
 const NOW = 1790103551 * 1000;
 const PACKAGES = [pkg("dappmanager.dnp.dappnode.eth", { isCore: true, version: "10.0.48" }), pkg("nimbus.avado.dnp.dappnode.eth"), pkg("ethchain-geth.public.dappnode.eth")];
 
-function backend(heartbeat: (body: Record<string, unknown>) => Response) {
+/** Prometheus answers per query: samples, or null for a query that fails (HTTP 500). */
+type PrometheusAnswers = Record<MetricKey, MetricSample[] | null>;
+
+function backend(heartbeat: (body: Record<string, unknown>) => Response, prometheus?: () => PrometheusAnswers) {
   return fakeFetch((url, init) => {
     if (url === "https://backend.test/api/care/heartbeat") return heartbeat(JSON.parse(String(init!.body)));
     if (url.startsWith("https://rpc.test")) return jsonResponse(200, { jsonrpc: "2.0", id: 0, result: JSON.stringify({ hash: "QmStore" }) });
     if (url === "http://ipfs.test:8080/ipfs/QmStore") return jsonResponse(200, { packages: [] });
+    const q = /\/query\?query=(.*)$/.exec(url);
+    if (prometheus && q) {
+      const key = (Object.keys(QUERIES) as MetricKey[]).find((k) => QUERIES[k] === decodeURIComponent(q[1]!));
+      const samples = key ? prometheus()[key] : [];
+      if (samples === null) return new Response("query failed", { status: 500 });
+      const result = samples.map((s) => ({ metric: { client: s.client, network: s.network }, value: [NOW / 1000, String(s.value)] }));
+      return jsonResponse(200, { status: "success", data: { resultType: "vector", result } });
+    }
     return new Response("not found", { status: 404 });
   });
 }
 
-function service(opts: { handlers?: Record<string, Handler>; fetch: typeof fetch; config?: Partial<Config>; now?: () => number }) {
+function service(opts: { handlers?: Record<string, Handler>; fetch: typeof fetch; config?: Partial<Config>; now?: () => number; state?: CareState }) {
   const config = testConfig(opts.config);
   const wamps: FakeWamp[] = [];
   const store = new StateStore(config.stateDir, silentLogger);
@@ -36,7 +49,7 @@ function service(opts: { handlers?: Record<string, Handler>; fetch: typeof fetch
     store,
     random: () => 0.5, // no jitter
   };
-  const care = new CareService(config, silentLogger, deps, emptyState());
+  const care = new CareService(config, silentLogger, deps, opts.state ?? emptyState());
   return { care, config, wamps, store };
 }
 
@@ -591,4 +604,92 @@ test("a package list that can't be refreshed for more than 24 h is not used any 
   assert.equal(last.verdict, "checking", "the box still checks in, as 'checking'");
   assert.deepEqual(last.packages, []);
   assert.deepEqual(last.findings, []);
+});
+
+test("two validator apps for one network: a tip the owner can hide in the Admin, never a warning or an email from Care", async () => {
+  const bodies: Array<{ verdict: string; findings: Array<{ id: string }> }> = [];
+  const f = backend((b) => (bodies.push(JSON.parse(String(b.payload))), jsonResponse(200, { ok: true, subscribed: true })));
+  const { care } = service({ handlers: dappmanagerHandlers([...PACKAGES, pkg("teku.avado.dnp.dappnode.eth")]), fetch: f.fetch });
+  await care.runOnce();
+  care.stop();
+  assert.equal(bodies[0]!.verdict, "ok");
+  assert.deepEqual(bodies[0]!.findings, []);
+  assert.ok(!care.status().findings.some((x) => x.id.startsWith("two-validator-clients:")));
+});
+
+// Prometheus on a monitored box (nimbus mainnet). The mainnet slot at NOW is WALL_SLOT.
+const MONITORED = [...PACKAGES, pkg("prometheus.avado.dappnode.eth")];
+const WALL_SLOT = Math.floor((NOW / 1000 - 1606824023) / 12);
+const HEAD_BEHIND = "head-behind:nimbus.avado.dnp.dappnode.eth";
+const LOW_PEERS = "low-peers:nimbus.avado.dnp.dappnode.eth";
+const nimbus = (value: number): MetricSample[] => [{ client: "nimbus", network: "mainnet", value }];
+
+test("one Prometheus query failing keeps its findings (no false 'cleared'); the queries that answer still clear theirs", async (t) => {
+  t.mock.method(console, "warn", () => {}); // the vendored fetchMetrics logs the failed query
+  let answers: PrometheusAnswers = { headSlot: nimbus(WALL_SLOT - 100), peers: nimbus(3), attesterMiss: [], attesterHit: [] };
+  const bodies: Array<{ verdict: string; findings: Array<{ id: string }> }> = [];
+  const f = backend((b) => (bodies.push(JSON.parse(String(b.payload))), jsonResponse(200, { ok: true, subscribed: true })), () => answers);
+  let now = NOW;
+  const { care } = service({ handlers: dappmanagerHandlers(MONITORED), fetch: f.fetch, now: () => now });
+  await care.runOnce();
+  const first = bodies[0]!.findings.map((x) => x.id);
+  assert.ok(first.includes(HEAD_BEHIND) && first.includes(LOW_PEERS), first.join(", "));
+  assert.equal(care.status().sources.metrics, "ok");
+
+  answers = { ...answers, headSlot: null, peers: nimbus(40) };
+  now += 10 * 60 * 1000;
+  await care.runOnce();
+  care.stop();
+  const second = bodies[1]!.findings.map((x) => x.id);
+  assert.ok(second.includes(HEAD_BEHIND), "the head-slot query failed: kept");
+  assert.ok(!second.includes(LOW_PEERS), "the peer query answered with 40 peers: cleared");
+  assert.equal(bodies[1]!.verdict, "warning");
+  assert.equal(care.status().sources.metrics, "partial");
+});
+
+test("a query that keeps failing has its findings carried for 24 h only, while the others answer", async (t) => {
+  t.mock.method(console, "warn", () => {});
+  let answers: PrometheusAnswers = { headSlot: nimbus(WALL_SLOT - 100), peers: nimbus(40), attesterMiss: [], attesterHit: [] };
+  const f = backend(() => jsonResponse(200, { ok: true, subscribed: true }), () => answers);
+  let now = NOW;
+  const { care, store } = service({ handlers: dappmanagerHandlers(MONITORED), fetch: f.fetch, now: () => now });
+  const hasHeadBehind = () => care.status().findings.some((x) => x.id === HEAD_BEHIND);
+  await care.runOnce();
+  assert.ok(hasHeadBehind());
+
+  answers = { ...answers, headSlot: null };
+  now = NOW + 23 * 60 * 60 * 1000;
+  await care.runOnce();
+  assert.ok(hasHeadBehind(), "still carried at 23 h");
+  const saved = await store.load();
+  assert.equal(saved.sourceOkAt["metrics.headSlot"], NOW, "the query's own last answer is on the volume");
+  assert.equal(saved.sourceOkAt.metrics, now, "Prometheus itself still answers");
+
+  now = NOW + 25 * 60 * 60 * 1000;
+  await care.runOnce();
+  care.stop();
+  assert.ok(!hasHeadBehind(), "dropped 24 h after the head-slot query last answered");
+});
+
+test("state from Care 0.1.0 (one time for all of Prometheus): a query failing right after the update keeps its findings", async (t) => {
+  t.mock.method(console, "warn", () => {});
+  const before = NOW - 10 * 60 * 1000;
+  const state = emptyState();
+  state.lastCheck = {
+    at: new Date(before).toISOString(),
+    verdict: "warning",
+    findings: [{ id: HEAD_BEHIND, severity: "warning", topic: "sync", title: "nimbus is 100 slots behind the chain", why: null }],
+    sources: { metrics: "ok" },
+  };
+  state.sourceOkAt = { metrics: before };
+  const bodies: Array<{ findings: Array<{ id: string }> }> = [];
+  const answers: PrometheusAnswers = { headSlot: null, peers: nimbus(40), attesterMiss: [], attesterHit: [] };
+  const f = backend((b) => (bodies.push(JSON.parse(String(b.payload))), jsonResponse(200, { ok: true, subscribed: true })), () => answers);
+  const { care, store } = service({ handlers: dappmanagerHandlers(MONITORED), fetch: f.fetch, state });
+  await care.runOnce();
+  care.stop();
+  assert.ok(bodies[0]!.findings.some((x) => x.id === HEAD_BEHIND), "kept, so the alert does not clear and email again");
+  const saved = await store.load();
+  assert.equal(saved.sourceOkAt["metrics.headSlot"], before, "0.1.0's time stands for the query until it answers");
+  assert.equal(saved.sourceOkAt["metrics.peers"], NOW);
 });

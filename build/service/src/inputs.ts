@@ -10,7 +10,11 @@
  *  - An input whose call was answered with an error (or whose HTTP request failed) 3 times in a
  *    row is left alone for 6 hours. A router that cannot be reached at all does not count: that
  *    costs no DAPPMANAGER work and ends as soon as the DAPPMANAGER is back.
+ *  - Prometheus: a read where only some queries failed still works (the others are used); each
+ *    query's last answer is also kept on its own ("metrics.headSlot", ...) for its carry-over.
  */
+import { QUERIES } from "./admin/health/prometheus.js";
+import type { MetricKey, Metrics } from "./admin/health/types.js";
 import { WampError } from "./wamp.js";
 import { DappmanagerError } from "./dappmanager.js";
 
@@ -21,7 +25,8 @@ export interface ClientFeeRecipients {
 }
 export type FeeRecipients = Record<string, ClientFeeRecipients>;
 
-export type SourceName = "packages" | "stats" | "params" | "chainData" | "updates" | "metrics" | "feeRecipients";
+/** "metrics.<key>": one Prometheus query, tracked only for when it last answered. */
+export type SourceName = "packages" | "stats" | "params" | "chainData" | "updates" | "metrics" | "feeRecipients" | `metrics.${MetricKey}`;
 
 export const PACKAGES_TTL_MS = 60 * 60 * 1000;
 /** The package-list TTL "check now" uses instead of PACKAGES_TTL_MS, so it shows current app state. */
@@ -66,6 +71,11 @@ export class Inputs {
   ) {
     for (const [name, at] of Object.entries(lastOk)) {
       if (typeof at === "number" && Number.isFinite(at)) this.tracker(name as SourceName).lastOkAt = at;
+    }
+    // State from Care 0.1.0 has one time for all of Prometheus, written only when every query answered.
+    const metricsOk = this.lastOkAt("metrics");
+    if (metricsOk !== null && !Object.keys(lastOk).some((name) => name.startsWith("metrics."))) {
+      for (const key of Object.keys(QUERIES)) this.tracker(`metrics.${key}` as SourceName).lastOkAt = metricsOk;
     }
   }
 
@@ -134,6 +144,24 @@ export class Inputs {
     if (cached && this.now() - cached.at < STORE_TTL_MS) return cached.value;
     const value = await this.read("updates", fetch);
     this.store = { at: this.now(), value };
+    return value;
+  }
+
+  /**
+   * Prometheus metrics (vendored fetchMetrics: null when no query answered). A read where only
+   * some queries failed (their keys are null) counts as working, and records each query that
+   * answered, so a query that keeps failing has its findings carried over for 24 h only.
+   */
+  async metrics(fetch: () => Promise<Metrics | null>): Promise<Metrics> {
+    const value = await this.read("metrics", async () => {
+      const m = await fetch();
+      if (!m) throw new Error("Prometheus did not answer");
+      return m;
+    });
+    const now = this.now();
+    for (const key of Object.keys(value) as MetricKey[]) {
+      if (value[key] != null) this.tracker(`metrics.${key}`).lastOkAt = now;
+    }
     return value;
   }
 
