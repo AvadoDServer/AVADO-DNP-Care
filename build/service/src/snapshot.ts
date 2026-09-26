@@ -299,18 +299,25 @@ const SEVERITY_RANK: Record<string, number> = { critical: 0, warning: 1, info: 2
 /**
  * For each input that failed in this check (and is listed in `carry`), keeps the previous
  * check's findings from that input instead of this check's, and recomputes the verdict.
- * This check's own findings from it are dropped: a whole input that failed gives none, but a
- * rule can still run on a partial Prometheus read (missed-attestations without the hit count)
- * and would raise or escalate a finding on half the data. Carried findings are marked `carried: true`.
+ * This check's own findings from every failed input (`failed`, whether or not it is carried) are
+ * dropped: a whole input that failed gives none, but a rule can still run on a partial Prometheus
+ * read (missed-attestations without the hit count reads every attestation as missed) and would
+ * raise or escalate a finding on half the data, also when there is nothing (left) to carry.
+ * Carried findings are marked `carried: true`.
  */
-export function carryOverFindings(check: CheckResult, previous: readonly PreviousFinding[], carry: ReadonlySet<CarrySource>): CheckResult {
-  if (!check.ready || carry.size === 0) return check;
-  const fromFailed = (id: string) => [...carry].some((source) => findingFromSource(id, source));
-  const kept = check.findings.filter((f) => !fromFailed(String(f.id)));
+export function carryOverFindings(
+  check: CheckResult,
+  previous: readonly PreviousFinding[],
+  carry: ReadonlySet<CarrySource>,
+  failed: ReadonlySet<CarrySource> = new Set(failedSources(check)),
+): CheckResult {
+  if (!check.ready || (carry.size === 0 && failed.size === 0)) return check;
+  const from = (sources: ReadonlySet<CarrySource>, id: string) => [...sources].some((source) => findingFromSource(id, source));
+  const kept = check.findings.filter((f) => !from(failed, String(f.id)) && !from(carry, String(f.id)));
   const have = new Set(kept.map((f) => f.id));
   const added: Finding[] = [];
   for (const p of previous) {
-    if (!fromFailed(p.id) || have.has(p.id)) continue;
+    if (!from(carry, p.id) || have.has(p.id)) continue;
     have.add(p.id);
     added.push({ id: p.id, severity: p.severity, topic: p.topic, title: p.title, ...(p.why ? { why: p.why } : {}), carried: true });
   }

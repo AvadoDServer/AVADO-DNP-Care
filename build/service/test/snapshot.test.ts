@@ -261,6 +261,30 @@ test("carry-over without the hit count: missed attestations keep their last seve
   assert.ok(!none.findings.some((f) => f.id === id), "no alert raised on half the data");
 });
 
+test("a failed query that is not carried (no answer within 24 h): its findings are still not raised from half the data", async () => {
+  const check = await runHealthCheck(
+    deps({ listPackages: MONITORED_BOX, fetchMetrics: async () => ({ headSlot: [], peers: [], attesterMiss: nimbus(3), attesterHit: null }) }),
+    silentLogger,
+  );
+  const id = "missed-attestations:nimbus.avado.dnp.dappnode.eth";
+  assert.equal(check.findings.find((f) => f.id === id)?.severity, "critical");
+
+  const r = carryOverFindings(check, [previous(id, "warning")], new Set());
+  assert.ok(!r.findings.some((f) => f.id === id), "neither the critical nor the old warning");
+  assert.ok(!r.findings.some((f) => f.severity === "critical"), r.findings.map((f) => f.id).join(", "));
+  assert.notEqual(r.verdict, "critical");
+});
+
+test("carry-over leaves a check alone when every input answered", async () => {
+  const check = await runHealthCheck(
+    deps({ listPackages: MONITORED_BOX, fetchMetrics: async () => ({ headSlot: [], peers: [], attesterMiss: nimbus(3), attesterHit: nimbus(1) }) }),
+    silentLogger,
+  );
+  const id = "missed-attestations:nimbus.avado.dnp.dappnode.eth";
+  assert.deepEqual(failedSources(check), []);
+  assert.equal(carryOverFindings(check, [previous(id, "warning")], new Set()), check, "the rule had all its data: its critical stands");
+});
+
 test("chainData messages are parsed like the Admin's parseChainDataMessages", () => {
   assert.deepEqual(parseChainDataMessage({ name: "ethchain", message: "connect ECONNREFUSED", syncing: false }), {
     name: "Mainnet",

@@ -255,7 +255,8 @@ export class CareService {
 
   /**
    * Failed inputs (and single failed Prometheus queries) whose previous findings are kept: only
-   * while they worked within the last 24 h.
+   * while they worked within the last 24 h. This check's own findings from a failed input are
+   * dropped either way (carryOverFindings), so a partial read never raises an alert on its own.
    */
   private carrySources(check: CheckResult): Set<CarrySource> {
     const out = new Set<CarrySource>();

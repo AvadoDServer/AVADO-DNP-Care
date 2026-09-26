@@ -671,6 +671,45 @@ test("a query that keeps failing has its findings carried for 24 h only, while t
   assert.ok(!hasHeadBehind(), "dropped 24 h after the head-slot query last answered");
 });
 
+const MISSED = "missed-attestations:nimbus.avado.dnp.dappnode.eth";
+
+test("the hit-count query failing on a box's first Prometheus read: no critical 'missed attestations' from the miss count alone", async (t) => {
+  t.mock.method(console, "warn", () => {});
+  const answers: PrometheusAnswers = { headSlot: [], peers: [], attesterMiss: nimbus(2), attesterHit: null };
+  const bodies: Array<{ verdict: string; findings: Array<{ id: string; level: string }> }> = [];
+  const f = backend((b) => (bodies.push(JSON.parse(String(b.payload))), jsonResponse(200, { ok: true, subscribed: true })), () => answers);
+  const { care } = service({ handlers: dappmanagerHandlers(MONITORED), fetch: f.fetch });
+  await care.runOnce();
+  care.stop();
+  assert.equal(care.status().sources.metrics, "partial");
+  assert.notEqual(bodies[0]!.verdict, "critical");
+  assert.ok(!bodies[0]!.findings.some((x) => x.id === MISSED), bodies[0]!.findings.map((x) => x.id).join(", "));
+  assert.ok(!bodies[0]!.findings.some((x) => x.level === "critical"));
+});
+
+test("the hit-count query failing for more than 24 h: the carried warning is dropped, never escalated to critical", async (t) => {
+  t.mock.method(console, "warn", () => {});
+  let answers: PrometheusAnswers = { headSlot: [], peers: [], attesterMiss: nimbus(1), attesterHit: nimbus(30) };
+  const bodies: Array<{ verdict: string; findings: Array<{ id: string; level: string }> }> = [];
+  const f = backend((b) => (bodies.push(JSON.parse(String(b.payload))), jsonResponse(200, { ok: true, subscribed: true })), () => answers);
+  let now = NOW;
+  const { care } = service({ handlers: dappmanagerHandlers(MONITORED), fetch: f.fetch, now: () => now });
+  const missed = () => bodies[bodies.length - 1]!.findings.filter((x) => x.id === MISSED).map((x) => x.level);
+  await care.runOnce();
+  assert.deepEqual(missed(), ["warning"], "1 of 31 missed");
+
+  answers = { ...answers, attesterHit: null };
+  now = NOW + 23 * 60 * 60 * 1000;
+  await care.runOnce();
+  assert.deepEqual(missed(), ["warning"], "carried at 23 h");
+
+  now = NOW + 25 * 60 * 60 * 1000;
+  await care.runOnce();
+  care.stop();
+  assert.deepEqual(missed(), [], "dropped 24 h after the hit count last answered");
+  for (const b of bodies) assert.notEqual(b.verdict, "critical");
+});
+
 test("state from Care 0.1.0 (one time for all of Prometheus): a query failing right after the update keeps its findings", async (t) => {
   t.mock.method(console, "warn", () => {});
   const before = NOW - 10 * 60 * 1000;
