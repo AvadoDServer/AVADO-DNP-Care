@@ -3,7 +3,7 @@ import { consensusWithoutExecution, executionWithoutConsensus, monitoringMissing
 import { updatesAvailable, coreUpdateAvailable, autoupdateOff, storeUnreachable, updateBlocked } from "./updates";
 import { feeRecipientMissing, twoValidatorClients } from "./validators";
 import { remoteAccessMissing } from "./access";
-import { diskHigh, diskFillingUp } from "./storage";
+import { diskHigh, diskFillingUp, consensusTooBig } from "./storage";
 import { diagnoseFailed } from "./core";
 import { chainSyncing, chainError, headBehind, lowPeers, missedAttestations } from "./chain";
 
@@ -18,6 +18,6 @@ export const ALL_RULES = [
   updatesAvailable, coreUpdateAvailable, autoupdateOff, storeUnreachable, updateBlocked,
   feeRecipientMissing, twoValidatorClients,
   remoteAccessMissing,
-  diskHigh, diskFillingUp, diagnoseFailed,
+  diskHigh, diskFillingUp, consensusTooBig, diagnoseFailed,
   chainSyncing, chainError, headBehind, lowPeers, missedAttestations,
 ];
