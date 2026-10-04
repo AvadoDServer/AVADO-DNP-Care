@@ -1,4 +1,4 @@
-import { getClient, NETWORKS } from "health/clients";
+import { getClient, NETWORKS, ROLES, CONSENSUS_SIZE_LIMIT, canResetBeaconData, storageMode } from "health/clients";
 import { appTitle, joinNames } from "./apps";
 
 export function parsePercent(value) {
@@ -276,3 +276,41 @@ diskFillingUp.needs = s => {
   const state = diskForecast(s.diskTrend, s.chainData).state;
   return state === "stable" || state === "roomy" || state === "filling";
 };
+
+// A consensus client far past its normal size (an archive or never-pruned
+// database). The fix clears just its chain data (DAPPMANAGER 10.0.50 and
+// newer; see resetBeaconData); on an older core it points to System >
+// Storage, which says what the client keeps.
+export function consensusTooBig({ packages }) {
+  return (packages || [])
+    .map(p => ({ p, client: getClient(p && p.name), size: appDiskUse(p) }))
+    .filter(({ client, size }) => client && client.role === ROLES.CONSENSUS && size > CONSENSUS_SIZE_LIMIT)
+    .map(({ p, client, size }) => {
+      const mode = storageMode(p);
+      const base = {
+        id: `consensus-too-big:${p.name}`,
+        severity: "warning",
+        topic: "storage",
+        appId: p.name,
+        title: `${appTitle(p)} is using ${formatDockerSize(size)}`,
+        ...(mode ? { detail: `Storage mode: ${mode.label}` } : {}),
+      };
+      // An archive setting uses this much space on purpose: a reset would
+      // only help until the history is downloaded again.
+      if (mode && mode.key === "archive") {
+        return {
+          ...base,
+          why: "It is set to keep the full chain history, which uses this much space on purpose. Free up space would only help until the history is downloaded again. Remove that setting in its Settings tab first; then Free up space keeps it small.",
+          fix: { kind: "link", to: `/packages/${p.name}?tab=settings`, label: "Open settings" },
+        };
+      }
+      return {
+        ...base,
+        why: "Normal is under 200 GB. Free up space deletes only its chain data and downloads a recent checkpoint instead. Your validator keys, slashing protection and settings stay. Your validators are offline for about 15 to 30 minutes while it syncs again.",
+        fix:
+          client.canResetBeacon && canResetBeaconData(packages)
+            ? { kind: "action", action: "resetBeaconData", label: "Free up space" }
+            : { kind: "link", to: "/system/storage", label: "See storage" },
+      };
+    });
+}
